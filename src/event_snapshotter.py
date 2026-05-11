@@ -51,8 +51,8 @@ DERIBIT_QUOTE_FIELDS = (
     "instrument_name",
     "bid_price",
     "ask_price",
-    "bid_iv",
-    "ask_iv",
+    # bid_iv / ask_iv are NOT in book_summary_by_currency; they come from the
+    # per-instrument ticker endpoint. Removed to avoid dead fields in the hash.
 )
 
 DERIBIT_INSTRUMENT_FIELDS = (

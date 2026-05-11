@@ -141,6 +141,16 @@ def evaluate_snapshot(snap_path: Path, lookup: dict[str, dict],
     except Exception as e:
         return {"snap_path": str(snap_path), "error": str(e), "rows": []}
 
+    # Metadatos del event_snapshotter (None si es snapshot temporal fijo).
+    ev_meta = snap.get("event_snapshotter") or {}
+    snap_trigger = ev_meta.get("trigger", "time_based")          # first/change/heartbeat/time_based
+    changed_sides = ev_meta.get("changed_sides") or []           # ['kalshi'], ['deribit'], ['kalshi','deribit']
+    snap_changed_side = (
+        "both" if len(changed_sides) > 1
+        else changed_sides[0] if len(changed_sides) == 1
+        else "none"
+    )
+
     # Sprint 2A: filtrar por calidad de expiry.
     quality = res.get("quality")
     quality_score = float(quality.score) if quality is not None else 1.0
@@ -194,6 +204,9 @@ def evaluate_snapshot(snap_path: Path, lookup: dict[str, dict],
             "T_K": float(res["T_K"]),
             "F": float(res["F"]),
             "expiry_quality": quality_score,
+            # event_snapshotter metadata (vacío en snapshots de tiempo fijo).
+            "snap_trigger": snap_trigger,
+            "changed_side": snap_changed_side,
         })
     return {
         "snap_path": str(snap_path),
@@ -598,6 +611,30 @@ def run(
             best = grid.sort_values("total", ascending=False).head(3)
             print("\n  TOP-3 combinaciones por total_pnl:")
             print(best.to_string(index=False, float_format=lambda x: f"{x:>9.4f}"))
+
+    # Análisis por changed_side (solo relevante con event_snapshotter).
+    if "changed_side" in df.columns and df["changed_side"].nunique() > 1:
+        print("\n" + "=" * 70)
+        print("  ANÁLISIS POR TIPO DE MOVIMIENTO (event_snapshotter)")
+        print("  changed_side: quién movió el mercado en ese snapshot")
+        print("  Hipótesis: el edge aparece cuando Kalshi mueve pero Deribit no")
+        print("=" * 70)
+        sides = df.groupby("changed_side").agg(
+            n=("outcome", "size"),
+            p_yes=("outcome", "mean"),
+            brier_q=("q_deribit", lambda x: float(((x.clip(1e-6, 1-1e-6) - df.loc[x.index, "outcome"]) ** 2).mean())),
+            mean_q=("q_deribit", "mean"),
+            mean_yes_mid=("yes_mid", "mean") if "yes_mid" in df.columns else ("q_deribit", "mean"),
+        ).reset_index()
+        print(sides.to_string(index=False))
+
+        # PnL por changed_side
+        for side in df["changed_side"].unique():
+            sub = df[df["changed_side"] == side]
+            p = executable_pnl(sub, threshold=0.01, q_col_buy="q_deribit", q_col_sell="q_deribit",
+                               deribit_fee=0.0, one_per_event=one_per_event)
+            print(f"\n  [{side}] n_buy={p.get('n_buy_yes',0)} n_sell={p.get('n_sell_yes',0)} "
+                  f"pnl={p.get('total_pnl',0.0):+.4f}")
 
     print("\n" + "=" * 70)
     print("  CALIDAD DE EXPIRY DERIBIT (Sprint 2)")
