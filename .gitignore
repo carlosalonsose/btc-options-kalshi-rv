@@ -1,0 +1,42 @@
+# Virtual environment
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Data (recolectada localmente, no para repo público)
+data/snapshots/
+data/kalshi_settled.json.gz
+data/reports/*.csv
+data/reports/*.txt
+# pero sí dejamos los plots de ejemplo:
+!data/reports/findings.png
+!data/reports/.gitkeep
+
+# Logs
+*.log
+nohup.out
+.snapshotter.pid
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+.ipynb_checkpoints/
+
+# Stub clients antiguos (placeholders del usuario, no usados)
+src/derbit_client.py
+src/kalshi_client.py
+src/market_normalizer.py
+src/probability_engine.py
+src/signal_engine.py
+src/surface_engine.py
+
+# Streamlit cache
+.streamlit/secrets.toml
