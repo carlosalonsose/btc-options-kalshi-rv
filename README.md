@@ -83,6 +83,31 @@ For each snapshot in `data/snapshots/`:
      (realistic), random (control). Decorrelates snapshots within an event.
    - **Liquidity grid**: spread × depth filters.
 
+### Event-driven data collection (`src/event_snapshotter.py`)
+
+The standard collector writes every 60 seconds. The event-driven collector polls
+more frequently but only persists a snapshot when bid/ask/size quote state
+changes on Kalshi or Deribit. It writes the same raw schema, so the existing
+backtest can run on its output directory.
+
+```bash
+# Poll every 10 seconds, write only when quote state changes
+bash event_start.sh
+
+# Optional overrides
+POLL_INTERVAL=5 WATCH=kalshi bash event_start.sh
+POLL_INTERVAL=2 WATCH=both HEARTBEAT_SECONDS=120 bash event_start.sh
+
+# Stop
+bash event_stop.sh
+
+# Backtest event-driven snapshots
+bash backtest.sh --snapshots data/event_snapshots
+```
+
+This is still REST-based event sampling, not a true exchange WebSocket feed.
+Its purpose is to measure signal decay and reduce stale 60-second observations.
+
 ### Visualization
 
 - **`findings.png`** — static 4-panel summary of the spread/liquidity
@@ -178,6 +203,7 @@ This introduces tracking error that vanilla payoff comparison ignores.
 ├── CHECKPOINT.md                   # plain-language project explanation
 ├── LICENSE                         # MIT license
 ├── start.sh / stop.sh              # snapshotter lifecycle
+├── event_start.sh / event_stop.sh  # event-driven snapshotter lifecycle
 ├── backtest.sh                     # re-run backtest
 ├── analytics.sh                    # launch Streamlit
 └── dash.sh                         # launch Tkinter dashboard
@@ -196,8 +222,12 @@ pip install -r requirements.txt
 # Collect data (runs in background, polls every 60s)
 bash start.sh
 
+# Alternative: event-driven collection (polls often, writes only changes)
+bash event_start.sh
+
 # After accumulating snapshots, run backtest
 bash backtest.sh                     # default: stride=5, max 1 trade/event
+bash backtest.sh --snapshots data/event_snapshots
 bash backtest.sh --all-trades        # disable per-event aggregation
 bash backtest.sh --fees-deribit 0.02 # custom Deribit fee
 

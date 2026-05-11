@@ -10,6 +10,7 @@ __pycache__/
 
 # Data (recolectada localmente, no para repo público)
 data/snapshots/
+data/event_snapshots/
 data/kalshi_settled.json.gz
 data/reports/*.csv
 data/reports/*.txt
