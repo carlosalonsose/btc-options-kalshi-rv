@@ -1,14 +1,14 @@
 """
-Visualizacion 2x2 de los hallazgos Fase 3 + 3.5.
+2x2 visualization of the Phase 3 + 3.5 findings.
 
-Cuenta la historia en 4 paneles:
-  A) Liquidez de bins Kalshi: la mayoria son ilíquidos.
-  B) yes_bid_size distribution: la mayoria no tienen bid.
-  C) Scatter q_buy_exec_Deribit vs yes_bid_Kalshi en TODO el universo,
-     resaltando los pocos bins ultra-liquidos donde aparece edge.
-  D) PnL acumulado realizado en el slice ultra-liquido (sell-yes only).
+The chart tells the story in four panels:
+  A) Kalshi bin liquidity: most bins are not tradable.
+  B) yes_bid_size distribution: most bins have little/no bid.
+  C) q_buy_repl_disc vs yes_bid_Kalshi for rows with a valid Deribit bracket,
+     highlighting the small liquid slice where edge appears.
+  D) Net PnL under event-level timing modes (sell-YES only).
 
-Genera data/reports/findings.png. No tiene CLI: solo importa pandas + matplotlib.
+Generates data/reports/findings.png. No CLI arguments are required.
 """
 from __future__ import annotations
 
@@ -20,34 +20,42 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from src.model.fees import kalshi_fee
+
 
 CSV = Path("data/reports/backtest.csv")
 OUT = Path("data/reports/findings.png")
 
-SPREAD_MAX = 0.03   # umbral del slice ultra-liquido
+SPREAD_MAX = 0.03   # liquid-slice spread threshold
 SIZE_MIN = 50
-EDGE_TH = 0.01      # threshold de edge para PnL
+EDGE_TH = 0.01      # edge threshold for PnL
+DERIBIT_FEE = 0.015
 
 
 def main() -> None:
     df = pd.read_csv(CSV)
     df["snap_ts"] = pd.to_datetime(df["snap_ts"])
     df = df.dropna(subset=["yes_bid", "yes_ask", "yes_spread",
-                            "yes_bid_size", "yes_ask_size",
-                            "q_buy_exec", "q_sell_exec", "outcome"]).copy()
+                           "yes_bid_size", "yes_ask_size", "outcome"]).copy()
+    repl = df.dropna(subset=["q_buy_repl_disc"]).copy()
 
     liq_mask = (
         (df["yes_spread"] <= SPREAD_MAX)
         & (df["yes_bid_size"] >= SIZE_MIN)
         & (df["yes_ask_size"] >= SIZE_MIN)
     )
-    liq = df[liq_mask].copy()
+    repl_liq_mask = (
+        (repl["yes_spread"] <= SPREAD_MAX)
+        & (repl["yes_bid_size"] >= SIZE_MIN)
+        & (repl["yes_ask_size"] >= SIZE_MIN)
+    )
+    liq = repl[repl_liq_mask].copy()
 
     fig, axes = plt.subplots(2, 2, figsize=(15, 11))
     fig.suptitle(
-        "Cross-Market Arbitrage  |  hallazgos Fase 3.5\n"
-        f"{len(df):,} filas (bin × snapshot) | {df['event_ticker'].nunique()} eventos | "
-        f"slice liquido: {len(liq)} filas",
+        "Cross-Market Relative Value  |  Key Backtest Findings\n"
+        f"{len(df):,} rows (bin × snapshot) | {df['event_ticker'].nunique()} events | "
+        f"valid discrete Deribit brackets: {len(repl):,} rows",
         fontsize=14, y=0.995,
     )
 
@@ -59,12 +67,12 @@ def main() -> None:
                label=f"slice cutoff = {SPREAD_MAX*100:.0f}c")
     ax.set_xlabel("yes_spread (yes_ask - yes_bid)  [USD]")
     ax.set_ylabel("# bins")
-    ax.set_title("A) Spread Kalshi: la mayoría de bins NO son tradables")
+    ax.set_title("A) Kalshi spread: most bins are not tradable")
     ax.legend()
     pct_below = (df["yes_spread"] <= SPREAD_MAX).mean() * 100
     ax.text(0.55, 0.85,
-            f"solo {pct_below:.0f}% de bins\n"
-            f"con spread ≤ 3c",
+            f"only {pct_below:.0f}% of bins\n"
+            f"with spread ≤ 3c",
             transform=ax.transAxes, fontsize=11,
             bbox=dict(boxstyle="round", facecolor="lightyellow"))
     ax.grid(True, alpha=0.3)
@@ -79,77 +87,109 @@ def main() -> None:
                label=f"slice cutoff = {SIZE_MIN}")
     ax.set_xlabel("yes_bid_size  (capped at 500)")
     ax.set_ylabel("# bins")
-    ax.set_title("B) Profundidad del bid: la mayoría de bins NO tienen bid")
+    ax.set_title("B) Bid depth: most bins have little/no displayed bid")
     ax.legend()
     ax.text(0.45, 0.6,
-            f"{pct_zero:.0f}% sin bid\n"
-            f"{pct_above:.0f}% con size ≥ {SIZE_MIN}",
+            f"{pct_zero:.0f}% with no bid\n"
+            f"{pct_above:.0f}% with size ≥ {SIZE_MIN}",
             transform=ax.transAxes, fontsize=11,
             bbox=dict(boxstyle="round", facecolor="lightyellow"))
     ax.grid(True, alpha=0.3)
 
-    # =================== C: scatter q_buy_exec vs yes_bid ===================
+    # =================== C: scatter q_buy_repl_disc vs yes_bid ===================
     ax = axes[1, 0]
-    nliq = df[~liq_mask]
-    ax.scatter(nliq["q_buy_exec"], nliq["yes_bid"],
+    nliq = repl[~repl_liq_mask]
+    ax.scatter(nliq["q_buy_repl_disc"], nliq["yes_bid"],
                s=4, alpha=0.15, color="lightgray",
-               label=f"resto de bins (n={len(nliq):,})")
+               label=f"replicable but illiquid (n={len(nliq):,})")
     win_mask = liq["outcome"] < 0.5
-    ax.scatter(liq.loc[win_mask, "q_buy_exec"], liq.loc[win_mask, "yes_bid"],
+    ax.scatter(liq.loc[win_mask, "q_buy_repl_disc"], liq.loc[win_mask, "yes_bid"],
                s=42, alpha=0.85, color="forestgreen", edgecolors="black", lw=0.4,
-               label=f"slice líquido, NO realizado (n={int(win_mask.sum())})")
-    ax.scatter(liq.loc[~win_mask, "q_buy_exec"], liq.loc[~win_mask, "yes_bid"],
+               label=f"liquid slice, NO realized (n={int(win_mask.sum())})")
+    ax.scatter(liq.loc[~win_mask, "q_buy_repl_disc"], liq.loc[~win_mask, "yes_bid"],
                s=42, alpha=0.85, color="firebrick", edgecolors="black", lw=0.4,
-               label=f"slice líquido, YES realizado (n={int((~win_mask).sum())})")
+               label=f"liquid slice, YES realized (n={int((~win_mask).sum())})")
     lim = max(0.6, df["yes_bid"].max() * 1.05)
-    ax.plot([0, lim], [0, lim], "k--", lw=1, alpha=0.6, label="y = x  (sin edge)")
+    ax.plot([0, lim], [0, lim], "k--", lw=1, alpha=0.6, label="y = x  (no edge)")
     ax.fill_between([0, lim], [0, lim], [lim, lim], alpha=0.07, color="green",
-                    label="zona SELL YES con edge")
+                    label="SELL YES edge region")
     ax.set_xlim(-0.01, lim)
     ax.set_ylim(-0.01, lim)
-    ax.set_xlabel("q_buy_exec  =  costo replicación LONG en Deribit")
-    ax.set_ylabel("yes_bid Kalshi  =  precio al que vendes YES")
-    ax.set_title("C) Donde aparece el edge: bins líquidos por encima de y=x")
+    ax.set_xlabel("q_buy_repl_disc  =  cost of discrete LONG replication")
+    ax.set_ylabel("Kalshi yes_bid  =  price received to sell YES")
+    ax.set_title("C) Where edge appears: liquid bins above y=x")
     ax.legend(fontsize=8.5, loc="lower right")
     ax.grid(True, alpha=0.3)
 
-    # =================== D: PnL acumulado en slice ===================
+    # =================== D: net PnL under per-event aggregation modes ===================
     ax = axes[1, 1]
-    sell_mask = (liq["yes_bid"] - liq["q_buy_exec"]) > EDGE_TH
-    trades = liq[sell_mask].sort_values("snap_ts").copy()
-    trades["pnl"] = trades["yes_bid"] - trades["outcome"]
-    trades["cum_pnl"] = trades["pnl"].cumsum()
-    trades["t_idx"] = np.arange(1, len(trades) + 1)
+    colors = {"best": "tab:green", "first": "tab:blue", "random": "tab:orange"}
+    summaries = []
+    for mode in ["best", "first", "random"]:
+        trades = _select_replicated_trades(repl, mode)
+        if trades.empty:
+            continue
+        ax.plot(
+            np.arange(1, len(trades) + 1),
+            trades["cum_pnl"],
+            "o-",
+            lw=2,
+            markersize=5,
+            color=colors[mode],
+            label=f"{mode}: {len(trades)} trades, ${trades['pnl'].sum():+.2f}",
+        )
+        summaries.append((mode, trades))
 
-    if len(trades) > 0:
-        ax.plot(trades["t_idx"], trades["cum_pnl"], "o-",
-                color="forestgreen", lw=2, markersize=6)
-        ax.axhline(0, color="black", lw=0.7)
-        for ev, sub in trades.groupby("event_ticker"):
-            ax.axvline(sub["t_idx"].iloc[0], color="gray", alpha=0.15, lw=1)
-        final = trades["cum_pnl"].iloc[-1]
-        avg = trades["pnl"].mean()
-        wr = (trades["outcome"] < 0.5).mean()
-        ax.text(0.05, 0.95,
-                f"n_trades = {len(trades)}\n"
-                f"PnL final = ${final:+.2f}\n"
-                f"avg/trade = ${avg:+.4f}\n"
-                f"winrate   = {wr:.1%}\n"
-                f"events    = {trades['event_ticker'].nunique()}",
-                transform=ax.transAxes, fontsize=10, va="top",
-                bbox=dict(boxstyle="round", facecolor="lightyellow"))
+    ax.axhline(0, color="black", lw=0.7)
+    first = dict(summaries).get("first") if summaries else None
+    if first is not None:
+        ax.text(
+            0.05, 0.95,
+            "headline assumptions\n"
+            "SELL YES only\n"
+            f"threshold = {EDGE_TH:.0%}\n"
+            f"Deribit fee = ${DERIBIT_FEE:.3f}\n"
+            "max 1 trade/event",
+            transform=ax.transAxes,
+            fontsize=10,
+            va="top",
+            bbox=dict(boxstyle="round", facecolor="lightyellow"),
+        )
     else:
-        ax.text(0.5, 0.5, "(sin trades)", ha="center", va="center")
+        ax.text(0.5, 0.5, "(no trades)", ha="center", va="center")
 
-    ax.set_xlabel("# trade (orden cronológico)")
-    ax.set_ylabel("PnL acumulado  [USD, por contrato]")
-    ax.set_title(f"D) Realizado: SELL YES en slice líquido, threshold={EDGE_TH*100:.0f}%")
+    ax.set_xlabel("# selected event-level trade")
+    ax.set_ylabel("Cumulative net PnL  [USD, per contract]")
+    ax.set_title("D) Net PnL: discrete replication + fees + timing")
+    ax.legend(fontsize=8.5, loc="lower right")
     ax.grid(True, alpha=0.3)
 
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     OUT.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUT, dpi=130, bbox_inches="tight")
-    print(f"plot guardado: {OUT}")
+    print(f"plot saved: {OUT}")
+
+
+def _select_replicated_trades(df: pd.DataFrame, mode: str) -> pd.DataFrame:
+    d = df.dropna(subset=["yes_bid", "yes_ask", "q_buy_repl_disc", "outcome"]).copy()
+    d["sell_edge"] = d["yes_bid"] - d["q_buy_repl_disc"]
+    d["sell_score"] = d["sell_edge"] - 0.5 * (d["yes_ask"] - d["yes_bid"]).fillna(0)
+    trades = d[d["sell_edge"] > EDGE_TH].copy()
+
+    if mode == "best":
+        trades = trades.sort_values("sell_score", ascending=False).drop_duplicates("event_ticker")
+    elif mode == "first":
+        trades = trades.sort_values("snap_ts").drop_duplicates("event_ticker")
+    elif mode == "random":
+        trades = trades.sample(frac=1, random_state=42).drop_duplicates("event_ticker")
+    else:
+        raise ValueError(f"unknown mode: {mode}")
+
+    trades = trades.sort_values("snap_ts").copy()
+    trades["fee_total"] = trades["yes_bid"].apply(kalshi_fee) + DERIBIT_FEE
+    trades["pnl"] = trades["yes_bid"] - trades["outcome"] - trades["fee_total"]
+    trades["cum_pnl"] = trades["pnl"].cumsum()
+    return trades
 
 
 if __name__ == "__main__":

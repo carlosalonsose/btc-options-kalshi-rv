@@ -12,9 +12,9 @@
 
 I built an end-to-end research pipeline that prices Kalshi BTC binary contracts
 against an SVI-calibrated risk-neutral distribution from Deribit options.
-Across 575 1-minute snapshots covering 21 settled events (~25h of intraday
-data, 18K bin-snapshot observations), the model's `q_deribit` is **46% better
-calibrated** (Brier score 0.0042 vs 0.0077) than Kalshi mid-prices. **However**,
+Across the current reference backtest (26 settled hourly events and 24.8K
+bin-snapshot observations), the model's `q_deribit` is **38% better
+calibrated** (Brier score 0.0043 vs 0.0069) than Kalshi mid-prices. **However**,
 once executable replication via discrete Deribit strikes is enforced and
 fees + per-event de-correlation are applied, the apparent edge largely
 disappears: realistic execution timing yields PnL ~−$0.32 over 12 events,
@@ -87,10 +87,14 @@ For each snapshot in `data/snapshots/`:
 
 - **`findings.png`** — static 4-panel summary of the spread/liquidity
   distributions and PnL realization.
+- **`notebooks/01_project_guide.ipynb`** — concise, reader-facing project guide
+  for portfolio review.
 - **Streamlit app** (`bash analytics.sh`) — interactive sliders for threshold,
   spread, depth, fees, and aggregation mode, with live PnL recompute.
 - **Tkinter dashboard** (`bash dash.sh`) — live snapshot view (kept for
   potential paper trading).
+
+![Backtest findings](data/reports/findings.png)
 
 ---
 
@@ -100,17 +104,17 @@ For each snapshot in `data/snapshots/`:
 
 | Metric | `q_deribit` (model) | `yes_mid` (Kalshi) |
 |---|---|---|
-| Brier score | **0.00417** | 0.00771 |
-| Log loss | **0.01418** | 0.03505 |
+| Brier score | **0.00426** | 0.00691 |
+| Log loss | **0.01578** | 0.03155 |
 
-Reliability diagram: `q_deribit` is nearly perfectly calibrated up to bucket
-0.4 (e.g., predicted 0.149 vs realized 0.153). Beyond that, sample size is
-the limiting factor (~23 rows total in higher buckets across 21 events).
+Reliability diagram: `q_deribit` is materially better calibrated in the dense
+low-probability region where most bins live. Higher-probability buckets remain
+sample-limited and should not be over-interpreted.
 
 ### 2. Kalshi mids systematically over-predict realized probabilities
 
-In the 0.4–0.5 prediction bucket, Kalshi mids predict 0.450 but realized
-frequency is 0.062 (bias **−0.39**). This is microstructural, not a market
+In the 0.4–0.5 prediction bucket, Kalshi mids predict 0.451 but realized
+frequency is 0.066 (bias **−0.39**). This is microstructural, not a market
 failure: spreads are wide and mids are not executable.
 
 ### 3. The executable edge against discrete replication is fragile
@@ -123,6 +127,11 @@ Deribit vertical bracketing the bin):
 | Best score per event (optimistic) | 12 | **+$1.46** |
 | First opportunity per event (realistic) | 12 | **−$0.32** |
 | Random pick per event | 12 | −$1.39 |
+
+Headline PnL assumptions: `model=repl` (`q_buy_repl_disc`), SELL-YES only,
+`threshold=1%`, max one trade per event, Kalshi fee formula
+`ceil(0.07*p*(1-p))`, Deribit fee constant `$0.015` per contract, and no
+additional liquidity filter beyond requiring a valid discrete Deribit bracket.
 
 **The "edge" of the optimistic mode is largely a cherry-picking artifact** of
 hindsight aggregation. With realistic execution timing, the system is
@@ -163,8 +172,11 @@ This introduces tracking error that vanilla payoff comparison ignores.
 │       ├── dashboard.py            # Tkinter live view
 │       └── streamlit_app.py        # interactive analytics
 ├── data/                           # (gitignored) snapshots, settled cache, reports
+├── notebooks/01_project_guide.ipynb # reader-facing guide to the project
+├── tests/                          # lightweight model sanity tests
 ├── HANDOVER.md                     # technical handover document
 ├── CHECKPOINT.md                   # plain-language project explanation
+├── LICENSE                         # MIT license
 ├── start.sh / stop.sh              # snapshotter lifecycle
 ├── backtest.sh                     # re-run backtest
 ├── analytics.sh                    # launch Streamlit
@@ -189,9 +201,17 @@ bash backtest.sh                     # default: stride=5, max 1 trade/event
 bash backtest.sh --all-trades        # disable per-event aggregation
 bash backtest.sh --fees-deribit 0.02 # custom Deribit fee
 
+# Run tests
+python3 -m unittest discover -s tests
+
 # Launch interactive analytics (browser opens at localhost:8501)
 bash analytics.sh
 ```
+
+Raw snapshots and generated CSV reports are intentionally gitignored because
+they are local data artifacts. The committed README and `findings.png` summarize
+the reference run; rerunning the backtest after collecting more snapshots will
+naturally update the metrics.
 
 ---
 
@@ -199,6 +219,7 @@ bash analytics.sh
 
 **Core:** Python 3.9, NumPy, SciPy (`brentq`, `least_squares`), Pandas
 **Visualization:** Matplotlib, Plotly, Streamlit, Tkinter
+**Testing:** Python `unittest`
 **APIs:** Kalshi REST (`/trade-api/v2/markets`, `/events`),
 Deribit REST (`/public/get_instruments`, `/get_book_summary_by_currency`,
 `/get_index_price`)
@@ -215,9 +236,10 @@ gaps before any live use:
 **Modeling**
 - VLT scaling is assumed; SSVI with no-calendar-arbitrage constraints would be
   more rigorous for multi-expiry.
-- Bootstrap CI of SVI fits to filter trades where the model is uncertain
-  (planned, see HANDOVER.md §10).
-- Expiry quality scoring to reject contaminated near-expiry surfaces.
+- Bootstrap CI of SVI fits is implemented as an optional diagnostic, but not
+  yet used as a default trade filter.
+- Expiry quality scoring is implemented, but production use would require
+  stricter threshold calibration.
 - Hybrid IV + realized-vol level adjustment for short horizons.
 
 **Microstructure (the real issue)**
@@ -236,7 +258,7 @@ gaps before any live use:
   not quantified per-trade.
 
 **Sample size**
-- 21 events / ~25h of intraday data is insufficient for statistical
+- 26 events / ~25h of intraday data is insufficient for statistical
   significance. The snapshotter is left running for accumulation.
 
 ---
@@ -246,14 +268,14 @@ gaps before any live use:
 The headline lesson is not the SVI calibration or the binary-contract pricing
 math. It's that **edge in cross-market relative value rarely survives
 honest execution modeling**. A naive comparison `q_deribit vs yes_mid` gives
-a 46% Brier improvement and looks like alpha; a comparison `yes_bid vs
+a 38% Brier improvement and looks like alpha; a comparison `yes_bid vs
 discrete-replication ask` with first-opportunity timing and fees gives no
 edge at all. The interesting questions in this domain are not "what's the
 fair value?" but "what fills can I actually get, when, and at what cost?".
 
 I also internalized why classical arbitrage between fundamentally similar
-contracts is rare in retail-accessible markets: the spreads charged by the
-venue (Kalshi: 10–30 cents on a $1 contract) are an order of magnitude
+contracts is rare in retail-accessible markets: the observed Kalshi spreads
+(often 10–30 cents on a $1 contract) are an order of magnitude
 larger than typical mispricings detectable from outside the order book.
 
 ---
