@@ -103,6 +103,60 @@ def fit_svi(
     return p, info
 
 
+def bootstrap_svi_params(
+    k_obs: np.ndarray,
+    w_obs: np.ndarray,
+    weights: np.ndarray | None = None,
+    n_boot: int = 100,
+    seed: int = 42,
+) -> list[SVIParams]:
+    """Genera N_boot fits SVI por re-muestreo con reemplazo (bootstrap paramétrico).
+
+    Devuelve una lista de SVIParams (puede ser mas corta que n_boot si algunos
+    fits fallan). Los params sirven para calcular intervalos de confianza de
+    q_deribit downstream.
+
+    Uso tipico:
+        boot_params = bootstrap_svi_params(k, w, weights, n_boot=100)
+        # Para cada bin [L, U]:
+        q_boots = [range_prob_open_ended(L, U, ..., p=p) for p in boot_params]
+        q_p05, q_p95 = np.percentile(q_boots, [5, 95])
+    """
+    k = np.asarray(k_obs, dtype=float)
+    w = np.asarray(w_obs, dtype=float)
+    if weights is None:
+        weights = np.ones_like(w)
+    weights = np.asarray(weights, dtype=float)
+
+    valid = np.isfinite(k) & np.isfinite(w) & (w > 0) & np.isfinite(weights) & (weights > 0)
+    k = k[valid]
+    w = w[valid]
+    weights = weights[valid]
+
+    if len(k) < 5:
+        return []
+
+    rng = np.random.default_rng(seed)
+    results: list[SVIParams] = []
+    # Primero fijar el fit central como semilla inicial para cada bootstrap.
+    try:
+        p0, _ = fit_svi(k, w, weights)
+    except Exception:
+        return []
+
+    n = len(k)
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        kb, wb, wtsb = k[idx], w[idx], weights[idx]
+        try:
+            p, info = fit_svi(kb, wb, weights=wtsb, init=p0)
+            if info.get("cost", float("inf")) < 1.0:   # filtro coste razonable
+                results.append(p)
+        except Exception:
+            continue
+    return results
+
+
 def forward_from_pcp(
     strikes: np.ndarray,
     call_mids: np.ndarray,

@@ -36,9 +36,10 @@ from src.io.load import (
 )
 from src.model.black_scholes import implied_vol
 from src.model.exec_price import compute_iv_bid_mid_ask, fit_two_sided_svi
-from src.model.intraday_q import BasisModel
+from src.model.intraday_q import BasisModel, range_prob_open_ended
 from src.model.replication_discrete import annotate_replication
-from src.model.svi import SVIParams, fit_svi, forward_from_pcp, total_variance, implied_vol_from_params
+from src.model.quality import expiry_quality_score, ExpiryQuality
+from src.model.svi import SVIParams, bootstrap_svi_params, fit_svi, forward_from_pcp, total_variance, implied_vol_from_params
 from src.signal.edge import annotate_edges, basket_summary
 
 YEAR_SECONDS = 365.0 * 24.0 * 3600.0
@@ -55,7 +56,8 @@ def _print_section(title: str) -> None:
     print("=" * 70)
 
 
-def run_pipeline(snap: dict, event_ticker: str | None = None) -> dict:
+def run_pipeline(snap: dict, event_ticker: str | None = None,
+                 bootstrap: bool = False, n_boot: int = 100) -> dict:
     """Pipeline puro: snap + (opcional) event_ticker -> dict con todos los resultados.
     No imprime nada, no toca disco, no arranca threads. Reutilizable desde el CLI
     y desde la UI."""
@@ -116,6 +118,17 @@ def run_pipeline(snap: dict, event_ticker: str | None = None) -> dict:
 
     svi_params, info = fit_svi(fit_df["k"].values, fit_df["w"].values, weights=weights)
 
+    # Sprint 2A: calidad de la expiry Deribit.
+    quality = expiry_quality_score(chain_e, F=F, T_D=T_D)
+
+    # Sprint 2B: Bootstrap CI para q_deribit (opcional, caro ~1-2s).
+    boot_params: list = []
+    if bootstrap:
+        boot_params = bootstrap_svi_params(
+            fit_df["k"].values, fit_df["w"].values, weights=weights,
+            n_boot=n_boot, seed=42,
+        )
+
     # Fase 3.5: fits adicionales bid/ask para precio Q ejecutable.
     otm_full = compute_iv_bid_mid_ask(chain_e, F=F, T_D=T_D)
     try:
@@ -137,6 +150,27 @@ def run_pipeline(snap: dict, event_ticker: str | None = None) -> dict:
     if "yes_bid" in annotated.columns and "q_buy_repl_disc" in annotated.columns:
         annotated["edge_sell_yes_repl"] = annotated["yes_bid"] - annotated["q_buy_repl_disc"]
 
+    # Sprint 2B: Bootstrap CI sobre q_deribit por bin.
+    if boot_params:
+        _basis = BasisModel()
+        q_p05_list, q_p95_list = [], []
+        for _, row in annotated.iterrows():
+            lo = row.get("lower")
+            hi = row.get("upper")
+            boots = [
+                range_prob_open_ended(lo, hi, F=F, T_K=T_K, T_D=T_D, p=p, basis=_basis)
+                for p in boot_params
+            ]
+            if boots:
+                q_p05_list.append(float(np.percentile(boots, 5)))
+                q_p95_list.append(float(np.percentile(boots, 95)))
+            else:
+                q_p05_list.append(float("nan"))
+                q_p95_list.append(float("nan"))
+        annotated["q_deribit_p05"] = q_p05_list
+        annotated["q_deribit_p95"] = q_p95_list
+        annotated["q_deribit_ci_width"] = annotated["q_deribit_p95"] - annotated["q_deribit_p05"]
+
     summary = basket_summary(annotated)
 
     return {
@@ -154,15 +188,17 @@ def run_pipeline(snap: dict, event_ticker: str | None = None) -> dict:
         "svi_params": svi_params,
         "svi_info": info,
         "two_sided": two_sided,
+        "quality": quality,
+        "n_boot_params": len(boot_params),
         "annotated": annotated,
         "summary": summary,
     }
 
 
 def run(snapshot_path: Path | None, event_ticker: str | None,
-        plot: bool, plot_dir: Path) -> None:
+        plot: bool, plot_dir: Path, bootstrap: bool = False) -> None:
     snap = latest_snapshot() if snapshot_path is None else load_snapshot(snapshot_path)
-    res = run_pipeline(snap, event_ticker=event_ticker)
+    res = run_pipeline(snap, event_ticker=event_ticker, bootstrap=bootstrap)
     snap_ts = res["snap_ts"]
     event_ticker = res["event_ticker"]
     events = res["events"]
@@ -196,12 +232,21 @@ def run(snapshot_path: Path | None, event_ticker: str | None,
     print(f"  n_options        = {len(fit_df)} OTM puntos para fit")
     print(f"  forward (PCP)    = {F:,.2f}")
 
+    quality = res["quality"]
+    _print_section("Calidad de expiry Deribit (Sprint 2)")
+    print(f"  score            = {quality.score:.3f}  {'✓ OK' if quality.ok else '✗ BAJA CALIDAD'}")
+    print(f"  n_valid_iv       = {quality.n_valid_iv} / {quality.n_total_otm} strikes OTM")
+    print(f"  n_quoted         = {quality.n_quoted} con bid+ask > 0")
+    print(f"  detalle          = {quality.message}")
+
     _print_section("Fit SVI")
     print(f"  n_points         = {info['n_points']}")
     print(f"  cost             = {info['cost']:.6e}")
     print(f"  success          = {info['success']}")
     print(f"  params           = a={svi_params.a:.4f} b={svi_params.b:.4f} "
           f"rho={svi_params.rho:.4f} m={svi_params.m:.4f} sigma={svi_params.sigma:.4f}")
+    if res["n_boot_params"] > 0:
+        print(f"  bootstrap CI     = {res['n_boot_params']} fits validos de n_boot solicitados")
 
     # Filtramos bins relevantes: q_deribit > 0.005 OR yes_mid > 0.02
     relevance = (annotated.get("q_deribit", 0) > 0.005) | (annotated.get("yes_mid", 0) > 0.02)
@@ -286,8 +331,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--plot", action="store_true",
                    help="genera plot smile + edges en data/reports/")
     p.add_argument("--plot-dir", type=Path, default=Path("data/reports"))
+    p.add_argument("--bootstrap", action="store_true",
+                   help="calcula intervalos de confianza bootstrap para q_deribit (lento ~2s)")
     args = p.parse_args(argv)
-    run(args.snapshot, args.event, args.plot, args.plot_dir)
+    run(args.snapshot, args.event, args.plot, args.plot_dir, bootstrap=args.bootstrap)
 
 
 if __name__ == "__main__":

@@ -131,7 +131,8 @@ def settled_lookup(settled: list[dict]) -> dict[str, dict]:
 
 # -------- per-snapshot evaluation -----------------------------------------
 
-def evaluate_snapshot(snap_path: Path, lookup: dict[str, dict]) -> dict:
+def evaluate_snapshot(snap_path: Path, lookup: dict[str, dict],
+                      min_quality: float = 0.0) -> dict:
     """Corre run_pipeline sobre el snapshot. Devuelve filas (un dict por bin
     cuyo outcome real esta disponible) + diagnosticos."""
     try:
@@ -139,6 +140,16 @@ def evaluate_snapshot(snap_path: Path, lookup: dict[str, dict]) -> dict:
         res = run_pipeline(snap)
     except Exception as e:
         return {"snap_path": str(snap_path), "error": str(e), "rows": []}
+
+    # Sprint 2A: filtrar por calidad de expiry.
+    quality = res.get("quality")
+    quality_score = float(quality.score) if quality is not None else 1.0
+    if quality_score < min_quality:
+        return {
+            "snap_path": str(snap_path),
+            "error": f"quality_score={quality_score:.2f} < min={min_quality:.2f}",
+            "rows": [],
+        }
 
     annotated = res["annotated"]
     rows: list[dict] = []
@@ -170,6 +181,9 @@ def evaluate_snapshot(snap_path: Path, lookup: dict[str, dict]) -> dict:
             "volume_24h": _f(b.get("volume_24h")),
             "open_interest": _f(b.get("open_interest")),
             "q_deribit": float(q),
+            "q_deribit_p05": _f(b.get("q_deribit_p05")),
+            "q_deribit_p95": _f(b.get("q_deribit_p95")),
+            "q_deribit_ci_width": _f(b.get("q_deribit_ci_width")),
             "q_buy_exec": _f(b.get("q_buy_exec")),
             "q_sell_exec": _f(b.get("q_sell_exec")),
             "q_buy_repl_disc": _f(b.get("q_buy_repl_disc")),
@@ -179,6 +193,7 @@ def evaluate_snapshot(snap_path: Path, lookup: dict[str, dict]) -> dict:
             "outcome": 1 if result == "yes" else 0,
             "T_K": float(res["T_K"]),
             "F": float(res["F"]),
+            "expiry_quality": quality_score,
         })
     return {
         "snap_path": str(snap_path),
@@ -187,6 +202,7 @@ def evaluate_snapshot(snap_path: Path, lookup: dict[str, dict]) -> dict:
         "T_K": float(res["T_K"]),
         "sum_q_deribit": float(res["summary"].get("sum_q_deribit") or 0.0),
         "n_bins": int(res["summary"].get("n_bins") or 0),
+        "expiry_quality": quality_score,
         "rows": rows,
     }
 
@@ -403,6 +419,7 @@ def run(
     limit: int | None,
     deribit_fee: float = 0.015,
     one_per_event: bool = True,
+    min_quality: float = 0.0,
 ) -> None:
     paths = list_snapshots(snapshots_dir)
     if not paths:
@@ -432,11 +449,12 @@ def run(
     all_rows: list[dict] = []
     t0 = time.time()
     n = len(paths)
-    print(f"evaluating {n} snapshots (stride={stride})...")
+    print(f"evaluating {n} snapshots (stride={stride}, min_quality={min_quality:.2f})...")
     for i, p in enumerate(paths, 1):
-        out = evaluate_snapshot(p, lookup)
+        out = evaluate_snapshot(p, lookup, min_quality=min_quality)
         if "error" in out and out["error"]:
-            diagnostics.append({"snap_path": out["snap_path"], "error": out["error"]})
+            diagnostics.append({"snap_path": out["snap_path"], "error": out["error"],
+                                 "expiry_quality": out.get("expiry_quality", float("nan"))})
         else:
             diagnostics.append({
                 "snap_path": out["snap_path"],
@@ -446,6 +464,7 @@ def run(
                 "sum_q_deribit": out["sum_q_deribit"],
                 "n_bins": out["n_bins"],
                 "n_matched": len(out["rows"]),
+                "expiry_quality": out.get("expiry_quality", float("nan")),
             })
         all_rows.extend(out.get("rows", []))
         if i % 10 == 0 or i == n:
@@ -581,6 +600,23 @@ def run(
             print(best.to_string(index=False, float_format=lambda x: f"{x:>9.4f}"))
 
     print("\n" + "=" * 70)
+    print("  CALIDAD DE EXPIRY DERIBIT (Sprint 2)")
+    print("=" * 70)
+    if not diag_df.empty and "expiry_quality" in diag_df.columns:
+        q_scores = diag_df["expiry_quality"].dropna()
+        if not q_scores.empty:
+            print(f"  snapshots totales procesados : {len(diag_df)}")
+            print(f"  con quality >= 0.25 (usable) : {int((q_scores >= 0.25).sum())}")
+            print(f"  con quality >= 0.50          : {int((q_scores >= 0.50).sum())}")
+            print(f"  con quality >= 0.75 (alta)   : {int((q_scores >= 0.75).sum())}")
+            print(f"  median quality               : {q_scores.median():.3f}")
+            print(f"  p25 / p75                    : {q_scores.quantile(0.25):.3f} / {q_scores.quantile(0.75):.3f}")
+    if "expiry_quality" in df.columns:
+        q_row = df["expiry_quality"].dropna()
+        if not q_row.empty:
+            print(f"  quality en filas con outcomes: media={q_row.mean():.3f}  median={q_row.median():.3f}")
+
+    print("\n" + "=" * 70)
     print("  SANITY: sum_q_deribit distribución (debe ≈ 1)")
     print("=" * 70)
     if not diag_df.empty and "sum_q_deribit" in diag_df.columns:
@@ -608,10 +644,13 @@ def main(argv: list[str] | None = None) -> None:
                    help="fee constante por contrato Deribit en USD (default 0.015)")
     p.add_argument("--all-trades", action="store_true",
                    help="contar TODOS los trades (default: max 1 por evento)")
+    p.add_argument("--min-quality", type=float, default=0.0,
+                   help="descartar snapshots con expiry_quality < umbral (0-1, default 0 = no filtro)")
     args = p.parse_args(argv)
     run(args.snapshots, args.out, args.stride, args.refresh, args.limit,
         deribit_fee=args.fees_deribit,
-        one_per_event=not args.all_trades)
+        one_per_event=not args.all_trades,
+        min_quality=args.min_quality)
 
 
 if __name__ == "__main__":
