@@ -127,7 +127,14 @@ class Dashboard:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Cross-Market Arbitrage  |  Kalshi vs Deribit")
-        self.root.geometry("1600x1000")
+
+        # Fit to screen — ask Tk for the real screen size before setting geometry
+        sw = root.winfo_screenwidth()
+        sh = root.winfo_screenheight()
+        w = min(1400, sw - 40)
+        h = min(860, sh - 60)
+        root.geometry(f"{w}x{h}+20+30")
+        root.minsize(900, 600)
 
         self._snap = None
         self._results: dict | None = None
@@ -136,8 +143,31 @@ class Dashboard:
 
         self._build_layout()
         self._poll_queue()
-        self.refresh()
+        # macOS Tkinter bug: window renders blank until it receives a Configure
+        # event. Force a 1-pixel resize cycle after mainloop starts to trigger
+        # the repaint, then kick off the first data refresh.
+        self.root.after(150, self._force_repaint)
         self._schedule_auto_refresh()
+
+    # ------------------------------------------------------------ macOS repaint fix
+
+    def _force_repaint(self) -> None:
+        """macOS Tkinter renders a blank window until it gets a resize event.
+        Nudge the geometry by 1px then back to force the initial paint."""
+        try:
+            geo = self.root.geometry()          # e.g. "1300x820+20+30"
+            parts = geo.replace("+", "x").split("x")
+            w, h = int(parts[0]), int(parts[1])
+            self.root.geometry(f"{w}x{h+1}+20+30")
+            self.root.update_idletasks()
+            self.root.geometry(f"{w}x{h}+20+30")
+            self.root.update_idletasks()
+        except Exception:
+            pass
+        # Now lift the window and kick off the first data load
+        self.root.lift()
+        self.root.focus_force()
+        self.refresh()
 
     # ------------------------------------------------------------ layout
 
@@ -185,7 +215,7 @@ class Dashboard:
         self._build_edge_tab(self.edge_frame)
 
         # === Status bar ===
-        self.status = ttk.Label(self.root, text="listo", anchor="w",
+        self.status = ttk.Label(self.root, text="iniciando pipeline...", anchor="w",
                                 relief="sunken", padding=(8, 2))
         self.status.pack(fill="x", side="bottom")
 
@@ -544,7 +574,8 @@ class Dashboard:
         self.ax_edges.legend(fontsize=9)
         self.ax_edges.grid(True, alpha=0.3)
 
-        self.canvas.draw_idle()
+        self.canvas.draw()
+        self.canvas.get_tk_widget().update()
 
     def _render_pipeline_table(self, ann: pd.DataFrame) -> None:
         for it in self.tree.get_children():
@@ -708,7 +739,8 @@ class Dashboard:
         # --- D: PnL acumulado histórico ---
         self._render_pnl_panel(self.ax_e_pnl)
 
-        self.edge_canvas.draw_idle()
+        self.edge_canvas.draw()
+        self.edge_canvas.get_tk_widget().update()
 
     def _render_pnl_panel(self, ax) -> None:
         if not BACKTEST_CSV.exists():

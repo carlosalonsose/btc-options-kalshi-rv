@@ -12,14 +12,15 @@
 
 I built an end-to-end research pipeline that prices Kalshi BTC binary contracts
 against an SVI-calibrated risk-neutral distribution from Deribit options.
-Across the current reference backtest (26 settled hourly events and 24.8K
-bin-snapshot observations), the model's `q_deribit` is **38% better
-calibrated** (Brier score 0.0043 vs 0.0069) than Kalshi mid-prices. **However**,
+Across the canonical backtest (71 settled hourly events, 7,775 snapshots and
+1.38M bin-snapshot observations from the event-driven collector), the model's
+`q_deribit` is **20% better in Brier score** (0.00481 vs 0.00602) and **34%
+better in log loss** (0.0184 vs 0.0281) than Kalshi mid-prices. **However**,
 once executable replication via discrete Deribit strikes is enforced and
-fees + per-event de-correlation are applied, the apparent edge largely
-disappears: realistic execution timing yields PnL ~−$0.32 over 12 events,
-with one cherry-picking aggregation mode showing +$1.46 (which I show
-to be optimistic).
+Kalshi + Deribit fees and per-event de-correlation are applied, the edge
+disappears: net PnL is negative at every threshold except a marginal +$0.06
+at a 5% threshold (24 buy / 63 sell trades), and only 14% of observations
+have an executable Deribit bracket at all.
 
 The project demonstrates **the gap between theoretical fair value and
 executable edge in cross-market relative value** — a trap most cross-market
@@ -125,45 +126,50 @@ Its purpose is to measure signal decay and reduce stale 60-second observations.
 
 ## Key findings
 
-### 1. The model is well-calibrated
+All numbers below come from the canonical run (`data/reports/backtest_canonical.txt`):
+event-driven dataset, stride 1, 71 settled events, 7,775 snapshots, 1,379,512
+bin-snapshot observations, base rate `p_yes = 0.0056`.
+
+### 1. The model beats Kalshi mids on probabilistic scoring
 
 | Metric | `q_deribit` (model) | `yes_mid` (Kalshi) |
 |---|---|---|
-| Brier score | **0.00426** | 0.00691 |
-| Log loss | **0.01578** | 0.03155 |
+| Brier score | **0.004812** | 0.006023 |
+| Log loss | **0.018406** | 0.028052 |
 
-Reliability diagram: `q_deribit` is materially better calibrated in the dense
-low-probability region where most bins live. Higher-probability buckets remain
-sample-limited and should not be over-interpreted.
+That is a 20% Brier and 34% log-loss improvement. Caveat: with a 0.56% YES
+base rate, ~98% of observations sit in the 0–10% bucket, so both models score
+well by predicting near-zero; the comparison is real but the magnitude is
+inflated by the base rate, not by large-probability skill.
 
 ### 2. Kalshi mids systematically over-predict realized probabilities
 
-In the 0.4–0.5 prediction bucket, Kalshi mids predict 0.451 but realized
-frequency is 0.066 (bias **−0.39**). This is microstructural, not a market
+In the 0.4–0.5 prediction bucket, Kalshi mids predict 0.461 but realized
+frequency is 0.073 (bias **−0.39**). This is microstructural, not a market
 failure: spreads are wide and mids are not executable.
 
 ### 3. The executable edge against discrete replication is fragile
 
-When PnL is computed against `q_buy_repl_disc` (the cost of the closest
-Deribit vertical bracketing the bin):
+PnL against `q_*_repl_disc` (the closest Deribit vertical bracketing the bin),
+SELL+BUY YES, one trade per event, Kalshi fee `ceil(0.07*p*(1-p))`, Deribit
+fee `$0.015`/contract, net of fees:
 
-| Aggregation mode | n trades | PnL net |
-|---|---|---|
-| Best score per event (optimistic) | 12 | **+$1.46** |
-| First opportunity per event (realistic) | 12 | **−$0.32** |
-| Random pick per event | 12 | −$1.39 |
+| Threshold | n buy | n sell | PnL net |
+|---|---|---|---|
+| 0.5% | 57 | 69 | **−$1.99** |
+| 1.0% | 54 | 68 | **−$1.86** |
+| 2.0% | 45 | 67 | **−$1.44** |
+| 3.0% | 38 | 67 | **−$1.05** |
+| 5.0% | 24 | 63 | **+$0.06** |
 
-Headline PnL assumptions: `model=repl` (`q_buy_repl_disc`), SELL-YES only,
-`threshold=1%`, max one trade per event, Kalshi fee formula
-`ceil(0.07*p*(1-p))`, Deribit fee constant `$0.015` per contract, and no
-additional liquidity filter beyond requiring a valid discrete Deribit bracket.
+Net PnL is negative at every threshold except a marginal break-even at 5%.
+Liquidity-filtered slices (spread ≤ 1–2¢, size ≥ 50) show small positive PnL
+(+$2.3 to +$2.6 over ~40–60 trades) but these are small-sample slices of a
+1.38M-row dataset and should be read as "not yet ruled out", not as edge.
 
-**The "edge" of the optimistic mode is largely a cherry-picking artifact** of
-hindsight aggregation. With realistic execution timing, the system is
-PnL-neutral.
-
-### 4. Only 11.4% of bin-snapshot observations have an executable Deribit
-bracket with valid bid/ask quotes. The rest are unhedgeable in practice.
+### 4. Only 14.0% of bin-snapshot observations (193,228 / 1,379,512) have an
+executable Deribit bracket with valid bid/ask quotes. The rest are
+unhedgeable in practice.
 
 ### 5. The structural mismatch
 
@@ -180,6 +186,7 @@ This introduces tracking error that vanilla payoff comparison ignores.
 .
 ├── src/
 │   ├── snapshotter.py              # 60s polling loop → JSON.gz snapshots
+│   ├── event_snapshotter.py        # event-driven collector (writes on quote change)
 │   ├── io/load.py                  # in-memory loaders, no I/O over network
 │   ├── model/
 │   │   ├── black_scholes.py        # bs_call, bs_put, bs_digital, implied_vol
@@ -187,6 +194,7 @@ This introduces tracking error that vanilla payoff comparison ignores.
 │   │   ├── intraday_q.py           # VLT-scaled range probability
 │   │   ├── exec_price.py           # 3-sided SVI fit (bid/mid/ask)
 │   │   ├── replication_discrete.py # discrete vertical-spread pricing
+│   │   ├── quality.py              # Deribit expiry quality score
 │   │   └── fees.py                 # Kalshi + Deribit fee model
 │   ├── signal/edge.py              # per-bin edge annotations
 │   ├── runner/
@@ -196,10 +204,11 @@ This introduces tracking error that vanilla payoff comparison ignores.
 │   └── ui/
 │       ├── dashboard.py            # Tkinter live view
 │       └── streamlit_app.py        # interactive analytics
-├── data/                           # (gitignored) snapshots, settled cache, reports
+├── data/
+│   ├── sample_snapshots/           # committed 1-day subset (reproducible backtest)
+│   └── reports/                    # committed canonical run output + findings.png
 ├── notebooks/01_project_guide.ipynb # reader-facing guide to the project
 ├── tests/                          # lightweight model sanity tests
-├── HANDOVER.md                     # technical handover document
 ├── CHECKPOINT.md                   # plain-language project explanation
 ├── LICENSE                         # MIT license
 ├── start.sh / stop.sh              # snapshotter lifecycle
@@ -225,9 +234,12 @@ bash start.sh
 # Alternative: event-driven collection (polls often, writes only changes)
 bash event_start.sh
 
-# After accumulating snapshots, run backtest
-bash backtest.sh                     # default: stride=5, max 1 trade/event
-bash backtest.sh --snapshots data/event_snapshots
+# Reproduce the committed reference run on the bundled sample subset
+bash backtest.sh --snapshots data/sample_snapshots --stride 1 \
+                 --out data/reports/backtest_sample.csv
+
+# After accumulating your own snapshots, run the full backtest
+bash backtest.sh --snapshots data/event_snapshots --stride 1
 bash backtest.sh --all-trades        # disable per-event aggregation
 bash backtest.sh --fees-deribit 0.02 # custom Deribit fee
 
@@ -238,10 +250,11 @@ python3 -m unittest discover -s tests
 bash analytics.sh
 ```
 
-Raw snapshots and generated CSV reports are intentionally gitignored because
-they are local data artifacts. The committed README and `findings.png` summarize
-the reference run; rerunning the backtest after collecting more snapshots will
-naturally update the metrics.
+Full raw snapshot history (~1.6 GB) is gitignored. A 1-day subset is committed
+under `data/sample_snapshots/` so a third party can reproduce a backtest on
+`git clone` without external data. The headline numbers below come from the
+**canonical run over the full event-driven dataset** (`data/reports/backtest_canonical.txt`,
+committed); the sample subset reproduces the same pipeline on less data.
 
 ---
 
@@ -288,8 +301,10 @@ gaps before any live use:
   not quantified per-trade.
 
 **Sample size**
-- 26 events / ~25h of intraday data is insufficient for statistical
-  significance. The snapshotter is left running for accumulation.
+- 71 settled events over ~5 days. Larger than the early runs, but with a
+  0.56% YES base rate the *effective* sample for the high-probability region
+  (where edge would live) is still small. Snapshots within an event are
+  correlated; per-event de-correlation mitigates but does not eliminate this.
 
 ---
 
@@ -298,9 +313,9 @@ gaps before any live use:
 The headline lesson is not the SVI calibration or the binary-contract pricing
 math. It's that **edge in cross-market relative value rarely survives
 honest execution modeling**. A naive comparison `q_deribit vs yes_mid` gives
-a 38% Brier improvement and looks like alpha; a comparison `yes_bid vs
-discrete-replication ask` with first-opportunity timing and fees gives no
-edge at all. The interesting questions in this domain are not "what's the
+a 20% Brier improvement and looks like alpha; switching to `yes_bid/ask vs
+discrete-replication` with fees and one trade per event gives net-negative
+PnL at every threshold but a marginal 5% break-even. The interesting questions in this domain are not "what's the
 fair value?" but "what fills can I actually get, when, and at what cost?".
 
 I also internalized why classical arbitrage between fundamentally similar

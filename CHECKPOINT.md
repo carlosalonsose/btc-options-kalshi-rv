@@ -2,7 +2,7 @@
 
 > Este documento explica el proyecto en lenguaje sencillo, sin jerga, con
 > ejemplos numéricos. Está pensado para releer cuando te pierdas.
-> Para detalles técnicos: ver [HANDOVER.md](HANDOVER.md).
+> Para detalles técnicos: ver [README.md](README.md).
 
 ---
 
@@ -37,13 +37,15 @@ Nuestro proyecto detecta y (eventualmente) opera esas discrepancias.
 
 ## 2. ¿Qué guarda el snapshotter?
 
-Cada **60 segundos** un proceso `.py` graba a disco un snapshot con:
+Un proceso `.py` graba a disco un snapshot con:
 
 - **Deribit**: lista de las ~3000 opciones BTC vivas con sus bid/ask, IV, etc.
 - **Kalshi**: lista de las ~300 fichas KXBTC abiertas con sus bid/ask y sizes.
 
-Cada snapshot es ~190 KB comprimido (`*.json.gz`). En 24h se acumulan
-~1,500 archivos. Llevamos ~25h grabando = ~575 archivos.
+Hay dos colectores: el de tiempo fijo (cada 60s) y el event-driven (sondea
+más a menudo, solo escribe cuando cambia el quote state). El dataset canónico
+del backtest usa el event-driven: ~8.9K snapshots sobre ~5 días. Cada snapshot
+es ~190 KB comprimido (`*.json.gz`).
 
 Esto es la **materia prima** del proyecto. Una vez en disco no necesitamos
 más Internet para analizar el pasado.
@@ -133,8 +135,8 @@ Para nuestra ventana actual: ~5,126 mercados settled.
 
 ### 5.2. Iterar sobre los snapshots
 
-Por defecto con `--stride 5` evalúa 1 snapshot cada 5 minutos. Para nuestros
-575 snapshots → 117 evaluaciones (~13 segundos en total).
+La corrida canónica usa `--stride 1` sobre el dataset event-driven completo
+(~8.9K snapshots, ~9 min). Para iterar rápido se puede subir el stride.
 
 Para cada snapshot:
 1. **Corre el pipeline completo** sobre ese snapshot. Le da una `q_deribit`,
@@ -146,8 +148,9 @@ Para cada snapshot:
      yes_bid, yes_ask, yes_spread, q_deribit, q_buy_exec, q_sell_exec,
      outcome (0/1), T_K, etc.
 
-Resultado: un CSV grande (`data/reports/backtest.csv`) con **17,984 filas**.
-Cada fila = una predicción que vamos a poder evaluar contra su outcome real.
+Resultado: un CSV grande con **1,379,512 filas** (71 eventos liquidados,
+7,775 snapshots con outcome). Cada fila = una predicción evaluable contra su
+outcome real.
 
 ### 5.3. Calcular métricas agregadas
 
@@ -158,22 +161,28 @@ Sobre ese CSV:
 brier = mean((q_predicha - outcome_real)²)
 ```
 Más bajo = mejor.
-- q_deribit: 0.00417
-- yes_mid Kalshi: 0.00771
-→ El modelo q es ~46% mejor que los mids de Kalshi.
+- q_deribit: 0.004812
+- yes_mid Kalshi: 0.006023
+→ El modelo q es ~20% mejor que los mids de Kalshi en Brier.
 
 **B. Log loss**: similar a Brier pero penaliza más las "convicciones equivocadas".
-- q_deribit: 0.0142
-- yes_mid Kalshi: 0.0351
+- q_deribit: 0.018406
+- yes_mid Kalshi: 0.028052
+→ ~34% mejor.
+
+**Matiz importante:** la tasa base de YES es 0.56%. ~98% de las observaciones
+caen en el bucket 0-10%, así que ambos modelos puntúan bien simplemente
+prediciendo ≈0. La mejora es real pero su magnitud está inflada por la tasa
+base, no por habilidad en la región de probabilidad alta.
 
 **C. Reliability diagram (calibración)**: agrupa las predicciones en 10
-buckets (0-10%, 10-20%, ..., 90-100%) y mira si "cuando el modelo dijo 30%,
-de verdad liquidó YES en ~30% de los casos". Resultado: q_deribit está
-**casi perfectamente calibrado** hasta el bucket 0.4.
+buckets (0-10%, ..., 90-100%) y mira si "cuando el modelo dijo 30%, de verdad
+liquidó YES en ~30% de los casos". q_deribit está bien calibrado hasta ~0.5;
+por encima la muestra es escasa (ruido, no señal).
 
-**D. Reliability por horizonte T_K**: ¿el modelo predice mejor cuando faltan
-5 min al settle vs 60 min? Resultado: estable, prácticamente igual de bueno
-en todos los horizontes (0.0039 → 0.0044).
+**D. Reliability por horizonte T_K**: ¿predice igual de bien a 5 min que a
+60 min? Brier sube de 0.0034 (0-5 min) a 0.0071 (>60 min): se degrada al
+alargar el horizonte. VLT scaling aguanta mejor cerca del settle.
 
 ### 5.4. Calcular PnL ejecutable (la parte clave)
 
@@ -192,17 +201,20 @@ Por defecto suma todos los trades sin filtros. Y también con un *grid de
 liquidez*: filtra solo a bins con spread bajo y profundidad alta antes de
 contar trades.
 
-Lo que vimos:
-- **Sin filtrar:** PnL siempre **negativo** a todos los thresholds.
-- **Con filtro slice ultra-líquido** (spread ≤ 3c AND bid_size ≥ 50):
-  PnL **positivo** (~+$1.67 acumulado en 18 trades).
+Lo que vimos (corrida canónica, replicación discreta, **fees descontados**,
+1 trade por evento):
+- PnL **negativo a todos los thresholds** salvo +$0.06 marginal al 5%
+  (24 buy / 63 sell). Solo el 14% de las observaciones tiene un bracket
+  Deribit ejecutable.
+- Slices ultra-líquidos (spread ≤ 1-2c AND size ≥ 50) dan PnL pequeño
+  positivo (+$2.3 a +$2.6 en ~40-60 trades), pero son sub-muestras
+  pequeñas de 1.38M filas: "no descartado todavía", no edge confirmado.
 
 ### 5.5. Lo que el backtest NO hace todavía
 
-- **No descuenta fees** Kalshi (~$0.02/contrato) ni Deribit (~$0.01/contrato).
-  El edge bruto $0.09/trade caería a ~$0.06 neto.
+- **Fees ya descontados** (Kalshi `ceil(0.07·p·(1−p))` + Deribit $0.015).
 - **No simula slippage** al ejecutar volúmenes grandes en Deribit.
-- **No modela "fill probability"** si tu estrategia es postear limit orders
+- **No modela "fill probability"** si la estrategia es postear limit orders
   en Kalshi en lugar de cruzar el spread.
 - **No descuenta el coste del horizon mismatch** (Kalshi liquida en T_K,
   Deribit en T_D > T_K — la replicación no es perfecta).
@@ -212,10 +224,10 @@ Lo que vimos:
 ## 6. Resumen visual del pipeline completo
 
 ```
-SNAPSHOTTER (cada 60s)
+SNAPSHOTTER (event-driven)
       │
       ▼
-data/snapshots/2026-05-09/172002.json.gz
+data/event_snapshots/2026-05-12/HHMMSS_micros.json.gz
       │
       ▼
   ┌──────────────── BACKTEST ────────────────┐
@@ -230,14 +242,14 @@ data/snapshots/2026-05-09/172002.json.gz
   │      (cache settled markets)             │
   │                                          │
   │   3. Joinear snapshot × outcome          │
-  │      → 17,984 filas                      │
+  │      → 1,379,512 filas                   │
   │                                          │
   │   4. Métricas: Brier, log loss,          │
   │      calibración, PnL ejecutable         │
   └───────────────────┬──────────────────────┘
                       │
                       ▼
-              data/reports/backtest.csv
+              data/reports/backtest_canonical.csv
                       │
                       ▼
         STREAMLIT APP (analytics interactivo)
@@ -248,62 +260,50 @@ data/snapshots/2026-05-09/172002.json.gz
 ## 7. Qué hemos descubierto (resultados)
 
 ### El bueno
-- **El modelo q es estadísticamente bueno**: predice mucho mejor que los
-  precios medios de Kalshi (Brier 46% mejor, log loss 2× mejor).
-- **Está calibrado**: cuando dice 25% acierta ~25% de las veces.
-- **Robusto al horizonte**: predice igual de bien a 5 min que a 60 min.
+- **El modelo q puntúa mejor que los mids de Kalshi**: Brier ~20% mejor,
+  log loss ~34% mejor (matiz: amplificado por la tasa base 0.56%).
+- **Calibrado** hasta el bucket ~0.5; por encima, muestra escasa.
 
 ### El malo
-- **Los spreads Kalshi son enormes** (mediana 1c en bins sin liquidez,
-  hasta 30c en otros). El edge teórico se evapora al cruzar.
-- **El 50% de bins no tienen bid** (nadie esperando comprar). No se
-  pueden tradear aunque el modelo grite oportunidad.
+- **Los spreads Kalshi son enormes**. El edge teórico se evapora al cruzar.
+- **Solo 14% de las observaciones** tiene un bracket Deribit ejecutable.
+- **PnL neto negativo** a todos los thresholds salvo +$0.06 marginal al 5%.
 
-### Lo que sigue siendo prometedor
-- **Slice ultra-líquido (spread ≤ 3c, size ≥ 50, ~10% de bins)**:
-  - Solo lado SELL YES (vender YES Kalshi + cubrirse con vertical Deribit).
-  - 18 trades en 25h.
-  - PnL +$1.67 bruto, avg +$0.093/trade, winrate 83%.
-  - Distribuido en 10 events distintos (no un outlier).
-  - Caveat: muestra pequeña, fees no descontados.
+### Lo que sigue siendo prometedor (con cautela)
+- Slices ultra-líquidos (spread ≤ 1-2c, size ≥ 50) dan PnL pequeño
+  positivo (+$2.3 a +$2.6 en ~40-60 trades). Son sub-muestras pequeñas
+  de 1.38M filas: no es edge confirmado, es "no descartado".
 
 ---
 
-## 8. Estado actual (2026-05-10)
+## 8. Estado actual
 
 | Componente | Estado | Comentario |
 |---|---|---|
-| Snapshotter persistente | ✅ corriendo | 575+ snapshots, ~25h |
+| Snapshotter (60s + event-driven) | ✅ | dataset canónico = event-driven |
 | Pipeline run_pipeline | ✅ | mid + bid/ask SVI fits |
-| Backtest offline | ✅ | con grid de liquidez |
+| Backtest offline | ✅ | fees + grid de liquidez + repl. discreta |
 | Visualización findings | ✅ | findings.png estático |
-| Dashboard Tkinter | ✅ vivo | snapshot actual (vigilancia) |
+| Dashboard Tkinter | ✅ | snapshot actual (vigilancia) |
 | Streamlit analytics | ✅ | histórico interactivo |
-| Fees en backtest | ❌ pendiente | siguiente paso |
-| Más datos (1 semana+) | ⏳ acumulando | clave antes de live |
-| Paper trading | ⏳ | solo si edge persiste |
+| Subset reproducible | ✅ | data/sample_snapshots/ committeado |
+| Paper trading | ⏳ | solo si el edge persiste con más datos |
 
 ---
 
-## 9. Qué hacer cuando vuelvas a este repo
+## 9. Cómo reproducir
 
 ```bash
-cd /Users/carlosalonso/Cross_market_arbitrage
+# Reproducir un backtest sobre el subset committeado (sin datos externos):
+bash backtest.sh --snapshots data/sample_snapshots --stride 1 \
+                 --out data/reports/backtest_sample.csv
 
-# Ver si el snapshotter sigue vivo:
-ps -ef | grep snapshotter | grep -v grep
+# Recolectar datos propios y correr el backtest completo:
+bash event_start.sh                       # colector event-driven
+bash backtest.sh --snapshots data/event_snapshots --stride 1
 
-# Si no, arrancarlo:
-bash start.sh
-
-# Re-correr el backtest con los datos nuevos:
-bash backtest.sh
-
-# Abrir analytics:
+# Analytics interactivo:
 bash analytics.sh
-
-# Cuando empieces a operar, vista vivo:
-bash dash.sh
 ```
 
 ---

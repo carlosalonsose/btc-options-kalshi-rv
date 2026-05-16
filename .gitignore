@@ -17,6 +17,10 @@ data/reports/*.txt
 # pero sí dejamos los plots de ejemplo:
 !data/reports/findings.png
 !data/reports/.gitkeep
+# subset reproducible + reports canónicos (sí van al repo)
+!data/sample_snapshots/
+!data/reports/backtest_canonical.txt
+!data/reports/backtest_sample.txt
 
 # Logs
 *.log
@@ -41,3 +45,6 @@ src/surface_engine.py
 
 # Streamlit cache
 .streamlit/secrets.toml
+
+# Documento de handover interno (scaffolding de trabajo, no parte del entregable)
+HANDOVER.md

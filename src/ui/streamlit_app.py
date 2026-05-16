@@ -17,6 +17,7 @@ from __future__ import annotations
 import gzip
 import json
 import math
+import subprocess
 import sys
 from pathlib import Path
 
@@ -37,23 +38,77 @@ from src.model.fees import kalshi_fee
 from src.runner.analyze import run_pipeline
 
 
-BACKTEST_CSV = Path("data/reports/backtest.csv")
-DIAG_CSV = Path("data/reports/backtest_diag.csv")
-SNAPSHOTS_DIR = Path("data/snapshots")
+BACKTEST_CSV        = Path("data/reports/backtest.csv")
+BACKTEST_EVENT_CSV  = Path("data/reports/backtest_event.csv")
+DIAG_CSV            = Path("data/reports/backtest_diag.csv")
+DIAG_EVENT_CSV      = Path("data/reports/backtest_event_diag.csv")
+SNAPSHOTS_DIR       = Path("data/snapshots")
+EVENT_SNAPSHOTS_DIR = Path("data/event_snapshots")
+
+# Mapas fuente → archivos y directorios
+_SOURCE_META = {
+    "original": {
+        "label":   "Original 60s (data/snapshots)",
+        "csv":     BACKTEST_CSV,
+        "diag":    DIAG_CSV,
+        "snap_dir": SNAPSHOTS_DIR,
+        "args":    ["--stride", "5"],
+        "gen_cmd": "bash backtest.sh --stride 5",
+    },
+    "event": {
+        "label":   "Event-driven (data/event_snapshots)",
+        "csv":     BACKTEST_EVENT_CSV,
+        "diag":    DIAG_EVENT_CSV,
+        "snap_dir": EVENT_SNAPSHOTS_DIR,
+        "args":    ["--snapshots", "data/event_snapshots", "--stride", "1",
+                    "--out", "data/reports/backtest_event.csv"],
+        "gen_cmd": "bash backtest.sh --snapshots data/event_snapshots --stride 1 --out data/reports/backtest_event.csv",
+    },
+}
 
 
 # --- helpers ----------------------------------------------------------------
 
+def csv_has_data(path: Path) -> bool:
+    return path.exists() and path.stat().st_size > 1
+
+
 @st.cache_data(show_spinner=False)
-def load_backtest() -> tuple[pd.DataFrame, pd.DataFrame]:
-    if not BACKTEST_CSV.exists():
+def load_backtest(csv_path: str, diag_path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Carga CSV de backtest. Parametrizado por ruta para que st.cache_data
+    distinga entre fuentes."""
+    p = Path(csv_path)
+    if not csv_has_data(p):
         return pd.DataFrame(), pd.DataFrame()
-    df = pd.read_csv(BACKTEST_CSV)
-    df["snap_ts"] = pd.to_datetime(df["snap_ts"], utc=True)
-    diag = pd.read_csv(DIAG_CSV) if DIAG_CSV.exists() else pd.DataFrame()
+
+    try:
+        df = pd.read_csv(p)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(), pd.DataFrame()
+
+    if "snap_ts" in df.columns:
+        df["snap_ts"] = pd.to_datetime(df["snap_ts"], utc=True, errors="coerce")
+
+    dp = Path(diag_path)
+    try:
+        diag = pd.read_csv(dp) if csv_has_data(dp) else pd.DataFrame()
+    except pd.errors.EmptyDataError:
+        diag = pd.DataFrame()
+
     if not diag.empty and "snap_ts" in diag.columns:
         diag["snap_ts"] = pd.to_datetime(diag["snap_ts"], utc=True, errors="coerce")
     return df, diag
+
+
+def run_backtest_from_app(args: list[str]) -> subprocess.CompletedProcess[str]:
+    cmd = [sys.executable, "-m", "src.runner.backtest", *args]
+    return subprocess.run(
+        cmd,
+        cwd=_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
 
 @st.cache_data(show_spinner=False, ttl=30)
@@ -162,14 +217,15 @@ def render_overview(df: pd.DataFrame, max_spread: float, min_size: float,
                     threshold: float, fee_deribit: float, one_per_event: bool,
                     fee_multiplier: float = 1.0,
                     event_pick: str = "first",
-                    model: str = "repl") -> None:
+                    model: str = "repl",
+                    snap_dir: Path = SNAPSHOTS_DIR) -> None:
     st.subheader("Resumen del estado del proyecto")
 
     if df.empty:
         st.warning("No hay backtest CSV. Corre `bash backtest.sh` primero.")
         return
 
-    n_snap_disk = len(list_snapshots(SNAPSHOTS_DIR))
+    n_snap_disk = len(list_snapshots(snap_dir))
     liq = filter_liquid(df, max_spread, min_size)
     pnl = compute_pnl_rows(liq, threshold, fee_deribit=fee_deribit,
                            one_per_event=one_per_event,
@@ -718,6 +774,33 @@ def main() -> None:
         )
 
         st.divider()
+        st.header("Fuente de datos")
+        source_key = st.radio(
+            "Backtest data source",
+            options=["original", "event"],
+            format_func=lambda x: _SOURCE_META[x]["label"],
+            index=0,
+        )
+        meta = _SOURCE_META[source_key]
+        csv_ready = csv_has_data(meta["csv"])
+        if not csv_ready:
+            st.warning(
+                f"CSV vacío o no existe.  \nPuedes generarlo con:  \n`{meta['gen_cmd']}`"
+            )
+            if st.button("Generar backtest ahora", type="primary"):
+                with st.spinner("Generando backtest... puede tardar un poco."):
+                    result = run_backtest_from_app(meta["args"])
+                if result.returncode == 0:
+                    load_backtest.clear()
+                    st.success("Backtest generado. Recargando dashboard...")
+                    st.rerun()
+                else:
+                    st.error("El backtest falló.")
+                    output = (result.stderr or result.stdout or "").strip()
+                    if output:
+                        st.code(output[-4000:])
+
+        st.divider()
         if st.button("Recargar CSV (forzar)"):
             load_backtest.clear()
             load_latest_snapshot_pipeline.clear()
@@ -725,11 +808,15 @@ def main() -> None:
         st.caption("CSV se cachea por defecto. Pulsa para releer del disco.")
 
         st.divider()
-        st.caption("Backtest CSV: " + (str(BACKTEST_CSV)
-                                       if BACKTEST_CSV.exists() else "no existe"))
-        st.caption(f"Snapshots: {len(list_snapshots(SNAPSHOTS_DIR))} en disco")
+        st.caption(
+            "Backtest CSV: "
+            + (str(meta["csv"]) if meta["csv"].exists() else "⚠ no existe")
+        )
+        st.caption(
+            f"Snapshots: {len(list_snapshots(meta['snap_dir']))} en disco"
+        )
 
-    df, diag = load_backtest()
+    df, diag = load_backtest(str(meta["csv"]), str(meta["diag"]))
     fee_deribit_eff = fee_deribit * fee_multiplier
 
     tab1, tab2, tab3, tab4 = st.tabs(["Overview", "Backtest interactivo",
@@ -737,7 +824,7 @@ def main() -> None:
     with tab1:
         render_overview(df, max_spread, min_size, threshold,
                         fee_deribit_eff, one_per_event, fee_multiplier,
-                        event_pick, model_label)
+                        event_pick, model_label, snap_dir=meta["snap_dir"])
     with tab2:
         render_backtest_interactive(df, max_spread, min_size, threshold,
                                     fee_deribit_eff, one_per_event,
