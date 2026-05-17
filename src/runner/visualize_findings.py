@@ -8,10 +8,15 @@ The chart tells the story in four panels:
      highlighting the small liquid slice where edge appears.
   D) Net PnL under event-level timing modes (sell-YES only).
 
-Generates data/reports/findings.png. No CLI arguments are required.
+Generates data/reports/findings.png from the canonical backtest CSV.
+
+Usage:
+  python -m src.runner.visualize_findings                 # canonical run
+  python -m src.runner.visualize_findings path/to.csv     # any backtest CSV
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -23,7 +28,7 @@ import pandas as pd
 from src.model.fees import kalshi_fee
 
 
-CSV = Path("data/reports/backtest.csv")
+CSV = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("data/reports/backtest_canonical.csv")
 OUT = Path("data/reports/findings.png")
 
 SPREAD_MAX = 0.03   # liquid-slice spread threshold
