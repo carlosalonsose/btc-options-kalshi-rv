@@ -156,11 +156,38 @@ subset bundled in-repo, and every number in this README/CHECKPOINT traced to
 it. In the process I found and now disclose that the 20% Brier "win" is
 amplified by the 0.56% YES base rate, not by large-probability skill.
 
+### Problem 9 — If taking the spread loses, can we *make* it instead?
+
+The taker strategy crosses Kalshi's wide spread and loses. The natural
+follow-up: post a tighter two-sided market around `q_deribit` and capture the
+spread as a maker. The objection is **adverse selection** — a resting quote
+fills precisely when the market (and BTC) has moved against the stale REST
+price it was based on.
+
+**Solution:** `src/runner/passive_fill.py` models this explicitly. A quote
+posted at snapshot `t` fills only if the market trades *through* it by `t+1`,
+and the Deribit hedge is repriced at `t+1` (so the move that triggers the
+fill also moves the hedge). Restricted to the hedgeable, liquid,
+near-settle slice and de-correlated per event:
+
+| Variant | n fills | hedged PnL net |
+|---|---|---|
+| naive (every posted quote fills @ t, hedged @ t — optimistic control) | 91 | **−$4.09** |
+| adverse (fills @ t+1 only, hedged @ t+1 — honest) | 56 | **−$2.42** |
+
+The maker idea **does not survive** either. The instructive detail: the
+*un-hedged* naive PnL is *positive* (+$1.98) because binaries mostly settle
+NO at a 0.56% base rate — the classic short-gamma "pick up pennies" illusion.
+Once the position is actually hedged, and once fills are conditioned on the
+adverse move that produced them, it is net-negative at every half-spread
+except a degenerate ~5¢ quote that barely improves the book.
+
 ### Where it stands now
 
 The pipeline is honest end-to-end and the result is **negative**: there is no
-robust executable edge for a retail REST-API trader. That negative result,
-properly demonstrated, is the deliverable.
+robust executable edge for a retail REST-API trader — neither as a taker
+(Problem 5) nor as a maker (Problem 9). That negative result, properly
+demonstrated, is the deliverable.
 
 ![Backtest findings — canonical run (71 events, 1.38M observations)](data/reports/findings.png)
 
@@ -245,7 +272,8 @@ This introduces tracking error that vanilla payoff comparison ignores.
 │   ├── signal/edge.py              # per-bin edge annotations
 │   ├── runner/
 │   │   ├── analyze.py              # pure pipeline + CLI
-│   │   ├── backtest.py             # offline PnL evaluation
+│   │   ├── backtest.py             # offline PnL evaluation (taker)
+│   │   ├── passive_fill.py         # maker / adverse-selection backtest
 │   │   └── visualize_findings.py   # static 4-panel plot
 │   └── ui/
 │       ├── dashboard.py            # Tkinter live view
@@ -288,6 +316,10 @@ bash backtest.sh --snapshots data/sample_snapshots --stride 1 \
 bash backtest.sh --snapshots data/event_snapshots --stride 1
 bash backtest.sh --all-trades        # disable per-event aggregation
 bash backtest.sh --fees-deribit 0.02 # custom Deribit fee
+
+# Maker / adverse-selection backtest (Problem 9)
+.venv/bin/python -m src.runner.passive_fill                 # canonical run
+.venv/bin/python -m src.runner.passive_fill --max-tk-min -1 # no near-settle filter
 
 # Run tests
 python3 -m unittest discover -s tests
