@@ -1,0 +1,16 @@
+source: data/reports/backtest_canonical.csv
+rows=1379512 events=71 unique_yes_bins=71
+bootstrap: 20000 resamples of events, seed=0, 95% percentile CI
+
+brier   model=0.004812 mid=0.006023
+  diff (mid - model)      = 0.001212  CI [0.000723, 0.001825]
+  relative improvement    = 20.1%  CI [12.9%, 27.9%]
+logloss model=0.018406 mid=0.028052
+  diff (mid - model)      = 0.009647  CI [0.007772, 0.012027]
+  relative improvement    = 34.4%  CI [28.0%, 41.4%]
+
+events where model beats mid: brier 56/71, logloss 67/71
+
+kalshi yes_spread (USD per contract)
+  all rows:   median=0.01 p90=0.03
+  active bins (2% < yes_mid < 98%, n=128201): median=0.05 mean=0.134 p75=0.11 p90=0.36

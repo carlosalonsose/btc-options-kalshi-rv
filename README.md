@@ -15,7 +15,9 @@ against an SVI-calibrated risk-neutral distribution from Deribit options.
 Across the canonical backtest (71 settled hourly events, 7,775 snapshots and
 1.38M bin-snapshot observations from the event-driven collector), the model's
 `q_deribit` is **20% better in Brier score** (0.00481 vs 0.00602) and **34%
-better in log loss** (0.0184 vs 0.0281) than Kalshi mid-prices. **However**,
+better in log loss** (0.0184 vs 0.0281) than Kalshi mid-prices (event-clustered
+95% bootstrap CIs: 13-28% and 28-41%; the interval excludes zero in both).
+**However**,
 once executable replication via discrete Deribit strikes is enforced and
 Kalshi + Deribit fees and per-event de-correlation are applied, the edge
 disappears: net PnL is negative at every threshold except a marginal +$0.06
@@ -38,7 +40,8 @@ fee sliders), and the Tkinter dashboard (`bash dash.sh`, live snapshot view).
 
 All numbers below come from the canonical run (`data/reports/backtest_canonical.txt`):
 event-driven dataset, stride 1, 71 settled events, 7,775 snapshots, 1,379,512
-bin-snapshot observations, base rate `p_yes = 0.0056`.
+bin-snapshot observations, base rate `p_yes = 0.0056`. Coverage: 2026-05-11
+16:07 UTC to 2026-05-16 15:51 UTC (about five days).
 
 ### 1. The model beats Kalshi mids on probabilistic scoring
 
@@ -47,10 +50,22 @@ bin-snapshot observations, base rate `p_yes = 0.0056`.
 | Brier score | **0.004812** | 0.006023 |
 | Log loss | **0.018406** | 0.028052 |
 
-That is a 20% Brier and 34% log-loss improvement. Caveat: with a 0.56% YES
-base rate, ~98% of observations sit in the 0–10% bucket, so both models score
-well by predicting near-zero; the comparison is real but the magnitude is
-inflated by the base rate, not by large-probability skill.
+That is a 20% Brier and 34% log-loss improvement. Observations within an event
+are highly correlated and there are only 71 YES outcomes (one winning bin per
+event), so the uncertainty is computed by resampling whole events
+(`src/runner/score_ci.py`, 20,000 resamples, output in `data/reports/score_ci.txt`):
+
+| Metric | Improvement over `yes_mid` | 95% CI | Events where model wins |
+|---|---|---|---|
+| Brier score | 20.1% | 12.9% to 27.9% | 56 / 71 |
+| Log loss | 34.4% | 28.0% to 41.4% | 67 / 71 |
+
+The improvement is statistically distinguishable from zero. Caveat: with a
+0.56% YES base rate, ~98% of observations sit in the 0–10% bucket, so both
+models score well by predicting near-zero; the magnitude is inflated by the
+base rate, not by large-probability skill. Restricted to rows where either
+probability exceeds 2% (133,720 rows), Brier is 0.0483 vs 0.0605. The CIs cover
+sampling noise within these five days only, not a change of market regime.
 
 ### 2. Kalshi mids systematically over-predict realized probabilities
 
@@ -62,7 +77,8 @@ failure: spreads are wide and mids are not executable.
 
 PnL against `q_*_repl_disc` (the closest Deribit vertical bracketing the bin),
 SELL+BUY YES, one trade per event, Kalshi fee `ceil(0.07*p*(1-p))`, Deribit
-fee `$0.015`/contract, net of fees:
+fee `$0.015`/contract (a flat approximation of the Deribit schedule,
+`min(0.03% of notional, 12.5% of premium)`; see `src/model/fees.py`), net of fees:
 
 | Threshold | n buy | n sell | PnL net |
 |---|---|---|---|
@@ -158,6 +174,9 @@ bash backtest.sh --fees-deribit 0.02 # custom Deribit fee
 .venv/bin/python -m src.runner.passive_fill                 # canonical run
 .venv/bin/python -m src.runner.passive_fill --max-tk-min -1 # no near-settle filter
 
+# Bootstrap CIs for the Brier / log-loss comparison (needs the canonical CSV)
+.venv/bin/python -m src.runner.score_ci
+
 # Run tests
 python3 -m unittest discover -s tests
 
@@ -165,7 +184,9 @@ python3 -m unittest discover -s tests
 bash analytics.sh
 ```
 
-Full raw snapshot history (~1.6 GB) is gitignored. A 1-day subset is committed
+Both collectors use only public REST endpoints, so no API keys are needed.
+The raw event-driven history behind the canonical run is ~1.7 GB (about
+340 MB per day) and the backtest output CSV is ~330 MB; both are gitignored. A 1-day subset is committed
 under `data/sample_snapshots/` so a third party can reproduce a backtest on
 `git clone` without external data. The headline numbers above come from the
 **canonical run over the full event-driven dataset** (`data/reports/backtest_canonical.txt`,
@@ -258,7 +279,7 @@ gaps before any live use:
   not quantified per-trade.
 
 **Sample size**
-- 71 settled events over ~5 days. Larger than the early runs, but with a
+- 71 settled events over ~5 days (2026-05-11 to 2026-05-16). Larger than the early runs, but with a
   0.56% YES base rate the *effective* sample for the high-probability region
   (where edge would live) is still small. Snapshots within an event are
   correlated; per-event de-correlation mitigates but does not eliminate this.
@@ -277,10 +298,11 @@ PnL at every threshold but a marginal 5% break-even.
 The interesting questions in this domain are not "what's the fair value?" but
 "what fills can I actually get, when, and at what cost?".
 
-I also internalized why classical arbitrage between fundamentally similar
-contracts is rare in retail-accessible markets: the observed Kalshi spreads
-(often 10–30 cents on a $1 contract) are an order of magnitude
-larger than typical mispricings detectable from outside the order book.
+Spreads explain much of it. Across all bins the median Kalshi spread is 1 cent,
+but on active bins (mid between 2% and 98%) it is 5 cents at the median, 11
+cents at the 75th percentile and 36 cents at the 90th (`data/reports/score_ci.txt`).
+Crossing that is expensive relative to the gaps a model built from the outside
+of the order book can find.
 
 ---
 
