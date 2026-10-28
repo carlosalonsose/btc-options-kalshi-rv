@@ -1,15 +1,18 @@
 source: data/reports/backtest_canonical.csv
-rows=1379512 events=71 unique_yes_bins=71
 bootstrap: 20000 resamples of events, seed=0, 95% percentile CI
+diff = mid - model; positive means the model is better
 
-brier   model=0.004812 mid=0.006023
-  diff (mid - model)      = 0.001212  CI [0.000723, 0.001825]
-  relative improvement    = 20.1%  CI [12.9%, 27.9%]
-logloss model=0.018406 mid=0.028052
-  diff (mid - model)      = 0.009647  CI [0.007772, 0.012027]
-  relative improvement    = 34.4%  CI [28.0%, 41.4%]
+[all rows] rows=1379512 events=71 yes_obs=7775 mean_outcome=0.00564 mean_q=0.00564 mean_mid=0.01588
+  brier   model=0.004812 mid=0.006023  diff(mid-model)=+0.001212  CI [+0.000723, +0.001825]  model wins in 56/71 events
+  logloss model=0.018406 mid=0.028052  diff(mid-model)=+0.009647  CI [+0.007772, +0.012027]  model wins in 67/71 events
 
-events where model beats mid: brier 56/71, logloss 67/71
+[yes_bid == 0 (mid = ask/2, not a probability)] rows=1309452 events=71 yes_obs=644 mean_outcome=0.00049 mean_q=0.00075 mean_mid=0.01119
+  brier   model=0.000507 mid=0.001890  diff(mid-model)=+0.001384  CI [+0.000897, +0.002013]  model wins in 68/71 events
+  logloss model=0.002778 mid=0.013693  diff(mid-model)=+0.010915  CI [+0.009017, +0.013323]  model wins in 69/71 events
+
+[yes_bid > 0 (real two-sided quote)] rows=70060 events=71 yes_obs=7131 mean_outcome=0.10178 mean_q=0.09696 mean_mid=0.10360
+  brier   model=0.085279 mid=0.083275  diff(mid-model)=-0.002003  CI [-0.004684, +0.000348]  model wins in 23/71 events
+  logloss model=0.310489 mid=0.296432  diff(mid-model)=-0.014058  CI [-0.031447, -0.000523]  model wins in 27/71 events
 
 kalshi yes_spread (USD per contract)
   all rows:   median=0.01 p90=0.03

@@ -36,7 +36,9 @@ unstable.
 **Solution:** fit an **SVI raw 5-parameter** smile (`src/model/svi.py`),
 OTM-only (puts for `K<F`, calls for `K≥F`), weighted by `1/spread`, with the
 put–call-parity forward `F = K + e^{rT}(C−P)` from ATM pairs. This yields a
-continuous, arbitrage-aware density instead of noisy point estimates. Sanity
+continuous density instead of noisy point estimates. The fit is bounded but
+has no butterfly or calendar no-arbitrage constraint, so it is not guaranteed
+arbitrage-free. Sanity
 check enforced in the backtest: `Σ q_deribit ≈ 0.9999` over the strip.
 
 ### Problem 3 — A mid-price probability is not tradable
@@ -107,7 +109,7 @@ of bug.
 committed (`data/reports/backtest_canonical.txt`), a 1-day reproducible
 subset bundled in-repo, and every number in this README/CHECKPOINT traced to
 it. In the process I found and now disclose that the 20% Brier "win" is
-amplified by the 0.56% YES base rate, not by large-probability skill.
+amplified by the 0.56% YES base rate (see Problem 10 for what that win really was).
 
 ### Problem 9 — If taking the spread loses, can we *make* it instead?
 
@@ -135,11 +137,28 @@ Once the position is actually hedged, and once fills are conditioned on the
 adverse move that produced them, it is net-negative at every half-spread
 except a degenerate ~5¢ quote that barely improves the book.
 
+### Problem 10 — The benchmark I beat was not a probability
+
+Even with a canonical run, the headline claim (the model beats Kalshi mids on
+Brier and log loss) survived only until the comparison was split by quote type.
+In 94.9% of rows `yes_bid` is zero, so `yes_mid = ask/2` (about 0.005) is not an
+estimate of anything: it averages 0.0112 against a realised frequency of 0.0005.
+Against that, any model that predicts near zero wins.
+
+**Solution:** `src/runner/score_ci.py` reports the comparison by quote type with
+event-clustered bootstrap intervals. On the 70,060 rows with a real two-sided
+quote the model is slightly *worse* than the mid (Brier 0.0853 vs 0.0833; the
+log-loss difference excludes zero in Kalshi's favour). The claim "the model beats
+the market" is withdrawn; what holds is that the model is no worse than
+predicting near-zero in the tails and no better than a liquid mid where the
+market is actually quoted.
+
 ### Where it stands now
 
 The pipeline is honest end-to-end and the result is **negative**: there is no
 robust executable edge for a retail REST-API trader — neither as a taker
-(Problem 5) nor as a maker (Problem 9). That negative result, properly
+(Problem 5) nor as a maker (Problem 9) — and the model does not beat liquid
+Kalshi mids (Problem 10). That negative result, properly
 demonstrated, is the deliverable.
 
 ![Backtest findings — canonical run (71 events, 1.38M observations)](../data/reports/findings.png)

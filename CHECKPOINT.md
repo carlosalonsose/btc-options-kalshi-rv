@@ -163,12 +163,14 @@ brier = mean((q_predicha - outcome_real)²)
 Más bajo = mejor.
 - q_deribit: 0.004812
 - yes_mid Kalshi: 0.006023
-→ El modelo q es ~20% mejor que los mids de Kalshi en Brier.
+→ Sobre todas las filas el modelo q parece ~20% mejor, pero es un artefacto: en el 95% de las
+filas `yes_bid = 0` y el mid es `ask/2`, que no es una probabilidad. Con cotización real a dos lados
+(`yes_bid > 0`) el modelo es ligeramente peor (0.0853 vs 0.0833). Ver `data/reports/score_ci.txt`.
 
 **B. Log loss**: similar a Brier pero penaliza más las "convicciones equivocadas".
 - q_deribit: 0.018406
 - yes_mid Kalshi: 0.028052
-→ ~34% mejor.
+→ Misma lectura: ~34% mejor sobre todas las filas, algo peor con cotización real (0.310 vs 0.296).
 
 **Matiz importante:** la tasa base de YES es 0.56%. ~98% de las observaciones
 caen en el bucket 0-10%, así que ambos modelos puntúan bien simplemente
@@ -260,8 +262,8 @@ data/event_snapshots/2026-05-12/HHMMSS_micros.json.gz
 ## 7. Qué hemos descubierto (resultados)
 
 ### El bueno
-- **El modelo q puntúa mejor que los mids de Kalshi**: Brier ~20% mejor,
-  log loss ~34% mejor (matiz: amplificado por la tasa base 0.56%).
+- **El modelo q no empeora al "predecir casi cero" en las colas**, pero NO supera a un mid líquido:
+  con cotización real a dos lados es ligeramente peor (ver `data/reports/score_ci.txt`).
 - **Calibrado** hasta el bucket ~0.5; por encima, muestra escasa.
 
 ### El malo

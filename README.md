@@ -14,19 +14,21 @@ I built an end-to-end research pipeline that prices Kalshi BTC binary contracts
 against an SVI-calibrated risk-neutral distribution from Deribit options.
 Across the canonical backtest (71 settled hourly events, 7,775 snapshots and
 1.38M bin-snapshot observations from the event-driven collector), the model's
-`q_deribit` is **20% better in Brier score** (0.00481 vs 0.00602) and **34%
-better in log loss** (0.0184 vs 0.0281) than Kalshi mid-prices (event-clustered
-95% bootstrap CIs: 13-28% and 28-41%; the interval excludes zero in both).
-**However**,
-once executable replication via discrete Deribit strikes is enforced and
-Kalshi + Deribit fees and per-event de-correlation are applied, the edge
-disappears: net PnL is negative at every threshold except a marginal +$0.06
+`q_deribit` scores better than Kalshi mid-prices over all rows (Brier 0.00481
+vs 0.00602), but that result comes from the 95% of rows where Kalshi's bid is
+zero and the "mid" is just `ask/2`, which is not a probability. **On the 5% of
+rows with a real two-sided quote, the model is not better than the market**
+(Brier 0.0853 vs 0.0833, log loss 0.310 vs 0.296; the log-loss gap excludes zero
+in favour of Kalshi under an event-clustered bootstrap). Separately, once the
+signal is gated by executable Deribit strikes and Kalshi + Deribit fees and
+per-event de-correlation are applied, no trading edge remains: net PnL is negative at every threshold except a marginal +$0.06
 at a 5% threshold (24 buy / 63 sell trades), and only 14% of observations
 have an executable Deribit bracket at all.
 
 The project demonstrates **the gap between theoretical fair value and
-executable edge in cross-market relative value**: a model can beat the market
-on probabilistic scoring and still have no tradable edge.
+executable edge in cross-market relative value**: a comparison that looks like
+alpha over all rows can come from a benchmark that is not a probability, and
+disappears when evaluated against executable quotes.
 
 ![Backtest findings — canonical run (71 events, 1.38M observations)](data/reports/findings.png)
 
@@ -43,29 +45,36 @@ event-driven dataset, stride 1, 71 settled events, 7,775 snapshots, 1,379,512
 bin-snapshot observations, base rate `p_yes = 0.0056`. Coverage: 2026-05-11
 16:07 UTC to 2026-05-16 15:51 UTC (about five days).
 
-### 1. The model beats Kalshi mids on probabilistic scoring
+### 1. The model beats Kalshi mids only where the mid is not a probability
+
+Over all rows the model scores better:
 
 | Metric | `q_deribit` (model) | `yes_mid` (Kalshi) |
 |---|---|---|
-| Brier score | **0.004812** | 0.006023 |
-| Log loss | **0.018406** | 0.028052 |
+| Brier score | 0.004812 | 0.006023 |
+| Log loss | 0.018406 | 0.028052 |
 
-That is a 20% Brier and 34% log-loss improvement. Observations within an event
-are highly correlated and there are only 71 YES outcomes (one winning bin per
-event), so the uncertainty is computed by resampling whole events
-(`src/runner/score_ci.py`, 20,000 resamples, output in `data/reports/score_ci.txt`):
+But 94.9% of rows (1,309,452) have `yes_bid == 0`. There the mid is `ask/2`
+(typically 0.005), averaging 0.0112 against a realised YES frequency of 0.0005,
+so it is a poor probability estimate and the model wins almost by construction.
+The fair comparison is on rows with a real two-sided quote (`yes_bid > 0`).
+Observations within an event are highly correlated and there are only 71 YES
+outcomes (one winning bin per event), so uncertainty is computed by resampling
+whole events (`src/runner/score_ci.py`, 20,000 resamples, 95% CI, output in
+`data/reports/score_ci.txt`). `diff` is mid minus model, so positive favours the model:
 
-| Metric | Improvement over `yes_mid` | 95% CI | Events where model wins |
-|---|---|---|---|
-| Brier score | 20.1% | 12.9% to 27.9% | 56 / 71 |
-| Log loss | 34.4% | 28.0% to 41.4% | 67 / 71 |
+| Subset | Rows | Brier model / mid | Brier diff, 95% CI | Log-loss diff, 95% CI | Events model wins (Brier) |
+|---|---|---|---|---|---|
+| All rows | 1,379,512 | 0.00481 / 0.00602 | +0.00121 [+0.00072, +0.00183] | +0.00965 [+0.00777, +0.01203] | 56 / 71 |
+| `yes_bid == 0` | 1,309,452 | 0.00051 / 0.00189 | +0.00138 [+0.00090, +0.00201] | +0.01092 [+0.00902, +0.01332] | 68 / 71 |
+| `yes_bid > 0` | 70,060 | 0.08528 / 0.08328 | −0.00200 [−0.00468, +0.00035] | −0.01406 [−0.03145, −0.00052] | 23 / 71 |
 
-The improvement is statistically distinguishable from zero. Caveat: with a
-0.56% YES base rate, ~98% of observations sit in the 0–10% bucket, so both
-models score well by predicting near-zero; the magnitude is inflated by the
-base rate, not by large-probability skill. Restricted to rows where either
-probability exceeds 2% (133,720 rows), Brier is 0.0483 vs 0.0605. The CIs cover
-sampling noise within these five days only, not a change of market regime.
+On real two-sided quotes the model is slightly worse than the mid: the Brier
+interval straddles zero and the log-loss interval excludes it in Kalshi's favour.
+The honest summary is that the SVI-based probability does not add information
+over a liquid Kalshi mid in this sample, and "beats the market" would be an
+overstatement. The intervals cover sampling noise within these five days only,
+not a change of market regime.
 
 ### 2. Kalshi mids systematically over-predict realized probabilities
 
@@ -75,7 +84,11 @@ failure: spreads are wide and mids are not executable.
 
 ### 3. The executable edge against discrete replication is fragile
 
-PnL against `q_*_repl_disc` (the closest Deribit vertical bracketing the bin),
+The PnL below is the **Kalshi leg only**: a BUY earns `outcome - yes_ask`, a
+SELL earns `yes_bid - outcome`, gated by whether the discrete Deribit
+replication price signals an edge, minus Kalshi fees and a flat Deribit fee per
+trade. The Deribit leg itself is not simulated, so this tests whether the signal
+predicts outcomes, not the PnL of a hedged position. PnL against `q_*_repl_disc` (the closest Deribit vertical bracketing the bin),
 SELL+BUY YES, one trade per event, Kalshi fee `ceil(0.07*p*(1-p))`, Deribit
 fee `$0.015`/contract (a flat approximation of the Deribit schedule,
 `min(0.03% of notional, 12.5% of premium)`; see `src/model/fees.py`), net of fees:
@@ -88,7 +101,8 @@ fee `$0.015`/contract (a flat approximation of the Deribit schedule,
 | 3.0% | 38 | 67 | **−$1.05** |
 | 5.0% | 24 | 63 | **+$0.06** |
 
-Net PnL is negative at every threshold except a marginal break-even at 5%.
+Net PnL is negative at every threshold except a marginal break-even at 5%
+(+$0.06 on 87 one-contract trades, which is noise).
 Liquidity-filtered slices (spread ≤ 1–2¢, size ≥ 50) show small positive PnL
 (+$2.3 to +$2.6 over ~40–60 trades) but these are small-sample slices of a
 1.38M-row dataset and should be read as "not yet ruled out", not as edge.
@@ -142,7 +156,7 @@ exists for a small/retail trader operating with REST API snapshots.
 5. **Maker variant.** Posted quotes with adverse-selection fills and a
    Deribit hedge repriced at `t+1`.
 
-The full write-up of the ten design problems and how each one changed the
+The full write-up of the eleven design problems and how each one changed the
 approach is in [docs/JOURNEY.md](docs/JOURNEY.md).
 
 ---
@@ -222,7 +236,7 @@ committed); the sample subset reproduces the same pipeline on less data.
 ├── data/
 │   ├── sample_snapshots/           # committed 1-day subset (reproducible backtest)
 │   └── reports/                    # committed canonical run output + findings.png
-├── docs/JOURNEY.md                 # the ten design problems and how each was solved
+├── docs/JOURNEY.md                 # the eleven design problems and how each was solved
 ├── notebooks/01_project_guide.ipynb # reader-facing guide to the project
 ├── tests/                          # lightweight model sanity tests
 ├── CHECKPOINT.md                   # plain-language project explanation
@@ -263,6 +277,16 @@ gaps before any live use:
   stricter threshold calibration.
 - Hybrid IV + realized-vol level adjustment for short horizons.
 
+**Evaluation**
+- Probabilistic scoring against `yes_mid` is only meaningful on rows with a
+  two-sided quote. A fairer baseline for zero-bid bins (for example a
+  calibrated function of the ask) is not implemented.
+- The PnL covers the Kalshi leg only; the Deribit hedge leg and its tracking
+  error are not simulated in the taker backtest.
+- The SVI fit has no butterfly or calendar no-arbitrage constraints, and the
+  digital price uses `N(d2)` with the strike's implied vol, without the
+  smile-skew correction.
+
 **Microstructure (the real issue)**
 - 60s REST snapshots are too slow for live execution. WebSocket order book
   feeds are required.
@@ -290,8 +314,10 @@ gaps before any live use:
 
 The headline lesson is not the SVI calibration or the binary-contract pricing
 math. It's that **edge in cross-market relative value rarely survives
-honest execution modeling**. A naive comparison `q_deribit vs yes_mid` gives
-a 20% Brier improvement and looks like alpha; switching to `yes_bid/ask vs
+honest execution modeling**. A naive comparison `q_deribit vs yes_mid` over all rows gives
+a 20% Brier improvement and looks like alpha; but that gain comes from zero-bid
+rows where the mid is not a probability, and on real two-sided quotes the model
+is no better than the market. Switching to `yes_bid/ask vs
 discrete-replication` with fees and one trade per event gives net-negative
 PnL at every threshold but a marginal 5% break-even.
 
