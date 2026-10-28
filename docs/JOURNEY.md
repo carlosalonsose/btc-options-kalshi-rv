@@ -153,12 +153,28 @@ the market" is withdrawn; what holds is that the model is no worse than
 predicting near-zero in the tails and no better than a liquid mid where the
 market is actually quoted.
 
+### Problem 11 — Is the model's complexity buying anything?
+
+With a fair benchmark the model is tied with the market, so the next question
+was which part of the model, if any, carries information.
+
+**Solution:** `src/runner/strip_score.py` scores whole-strip distributions (log
+score of the winning bin and RPS, bins ordered by strike so open tails sit at
+the ends) and compares the model with simpler baselines: a flat-vol lognormal
+using the SVI ATM vol, and flat-vol lognormals using the index's realised vol
+over 1, 3, 6 and 24 hours. Result: the flat-ATM lognormal is indistinguishable
+from the full SVI model (log-score diff −0.003, 95% CI [−0.013, +0.007]), and
+realised vol does not beat implied vol. The smile shape and the VLT machinery
+add nothing measurable in this sample; the ATM implied vol level does the work.
+The realised-vol comparisons on short windows are underpowered (20-27 events)
+because the collector has gaps.
+
 ### Where it stands now
 
 The pipeline is honest end-to-end and the result is **negative**: there is no
 robust executable edge for a retail REST-API trader — neither as a taker
-(Problem 5) nor as a maker (Problem 9) — and the model does not beat liquid
-Kalshi mids (Problem 10). That negative result, properly
+(Problem 5) nor as a maker (Problem 9) — and the model neither beats liquid
+Kalshi mids (Problem 10) nor improves on a flat-vol lognormal (Problem 11). That negative result, properly
 demonstrated, is the deliverable.
 
 ![Backtest findings — canonical run (71 events, 1.38M observations)](../data/reports/findings.png)

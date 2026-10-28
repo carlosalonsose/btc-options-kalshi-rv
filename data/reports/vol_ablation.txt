@@ -1,0 +1,18 @@
+source: data/reports/backtest_canonical.csv + data/reports/snapshot_features.csv
+snapshots=7775 events=71  floor=0.0001  bootstrap=5000 resamples of events
+scores: lower is better; diff = baseline - model, positive favours the model.
+Each baseline is compared with the model on the snapshots where the baseline is defined
+(realised-vol windows need enough valid minutes of index data; the collector has gaps).
+
+baseline     snaps events | logscore: model  baseline diff [95% CI]                    | RPS: model  baseline diff [95% CI]                   
+mkt_quoted    7775     71 |          2.3565    2.5334  +0.1770 [-0.1186, +0.5984] |     1.5200    1.5145  -0.0055 [-0.2047, +0.2053]
+mkt_bid       7775     71 |          2.3565    2.5596  +0.2031 [-0.1056, +0.6343] |     1.5200    1.5336  +0.0136 [-0.1896, +0.2240]
+flat_atm      7775     71 |          2.3565    2.3537  -0.0027 [-0.0125, +0.0066] |     1.5200    1.5200  -0.0000 [-0.0013, +0.0016]
+rv_1h         5936     25 |          2.2715    2.3117  +0.0402 [-0.1065, +0.2368] |     1.3716    1.4268  +0.0552 [-0.0192, +0.1644]
+rv_3h         3953     20 |          2.1693    2.1724  +0.0031 [-0.1531, +0.1286] |     1.1812    1.2076  +0.0264 [-0.0248, +0.0728]
+rv_6h         4391     27 |          2.2150    2.2767  +0.0617 [-0.0697, +0.1668] |     1.3746    1.4362  +0.0615 [-0.0026, +0.1360]
+rv_24h        7062     67 |          2.3979    2.5427  +0.1448 [+0.0505, +0.2352] |     1.5670    1.6455  +0.0784 [+0.0323, +0.1252]
+
+stability: first vs second half of events (by snapshot time)
+  first half  events= 32 model=2.103 mkt_quoted=2.505 flat_atm=2.108 rv_1h=1.944
+  second half events= 40 model=2.610 mkt_quoted=2.561 flat_atm=2.600 rv_1h=2.703

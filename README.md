@@ -76,6 +76,39 @@ over a liquid Kalshi mid in this sample, and "beats the market" would be an
 overstatement. The intervals cover sampling noise within these five days only,
 not a change of market regime.
 
+### 1b. Full-strip scoring: the model is tied with the market, and the smile adds nothing
+
+The bins of an event partition the price line, so each snapshot is a categorical
+forecast. `src/runner/strip_score.py` scores every method as a distribution over
+the strip (all floored at 1e-4 and renormalised) with the log score of the
+winning bin and the ranked probability score (RPS). The market baseline uses the
+mid only on bins with a real bid (zero elsewhere), then normalises. `diff` is
+baseline minus model, so positive favours the model; 95% CIs by event-clustered
+bootstrap (`data/reports/vol_ablation.txt`):
+
+| Baseline | Snapshots / events | Log-score diff | RPS diff |
+|---|---|---|---|
+| Kalshi mid on quoted bins | 7,775 / 71 | +0.177 [−0.119, +0.598] | −0.006 [−0.205, +0.205] |
+| Kalshi bid | 7,775 / 71 | +0.203 [−0.106, +0.634] | +0.014 [−0.190, +0.224] |
+| Flat lognormal, SVI ATM vol | 7,775 / 71 | −0.003 [−0.013, +0.007] | −0.000 [−0.001, +0.002] |
+| Flat lognormal, realised vol 1h | 5,936 / 25 | +0.040 [−0.107, +0.237] | +0.055 [−0.019, +0.164] |
+| Flat lognormal, realised vol 3h | 3,953 / 20 | +0.003 [−0.153, +0.129] | +0.026 [−0.025, +0.073] |
+| Flat lognormal, realised vol 6h | 4,391 / 27 | +0.062 [−0.070, +0.167] | +0.062 [−0.003, +0.136] |
+| Flat lognormal, realised vol 24h | 7,062 / 67 | +0.145 [+0.051, +0.235] | +0.078 [+0.032, +0.125] |
+
+Reading it:
+- **Against the market:** tied. No interval excludes zero.
+- **Smile versus flat vol:** a lognormal with constant vol equal to the SVI ATM
+  vol scores the same as the full SVI model. The smile shape adds no measurable
+  information here; the ATM vol level carries the result.
+- **Implied versus realised vol:** realised vol is not better than implied ATM
+  vol. The 24h window is clearly worse; the shorter windows are
+  indistinguishable but rest on 20-27 events, because the collector has gaps and
+  a window needs enough valid 1-minute returns.
+- **Stability:** every method scores worse in the second half of the sample than
+  in the first, so absolute scores depend on the period; only the differences
+  are informative.
+
 ### 2. Kalshi mids systematically over-predict realized probabilities
 
 In the 0.4–0.5 prediction bucket, Kalshi mids predict 0.461 but realized
@@ -156,7 +189,7 @@ exists for a small/retail trader operating with REST API snapshots.
 5. **Maker variant.** Posted quotes with adverse-selection fills and a
    Deribit hedge repriced at `t+1`.
 
-The full write-up of the eleven design problems and how each one changed the
+The full write-up of the twelve design problems and how each one changed the
 approach is in [docs/JOURNEY.md](docs/JOURNEY.md).
 
 ---
@@ -190,6 +223,10 @@ bash backtest.sh --fees-deribit 0.02 # custom Deribit fee
 
 # Bootstrap CIs for the Brier / log-loss comparison (needs the canonical CSV)
 .venv/bin/python -m src.runner.score_ci
+
+# Full-strip scoring and vol ablation (features first, then scoring)
+.venv/bin/python -m src.runner.snapshot_features
+.venv/bin/python -m src.runner.strip_score
 
 # Run tests
 python3 -m unittest discover -s tests
@@ -229,6 +266,9 @@ committed); the sample subset reproduces the same pipeline on less data.
 │   │   ├── analyze.py              # pure pipeline + CLI
 │   │   ├── backtest.py             # offline PnL evaluation (taker)
 │   │   ├── passive_fill.py         # maker / adverse-selection backtest
+│   │   ├── score_ci.py             # event-clustered bootstrap CIs, split by quote type
+│   │   ├── snapshot_features.py    # per-snapshot F, SVI params, ATM vol, index price
+│   │   ├── strip_score.py          # full-strip log score / RPS and vol ablation
 │   │   └── visualize_findings.py   # static 4-panel plot
 │   └── ui/
 │       ├── dashboard.py            # Tkinter live view
@@ -236,7 +276,7 @@ committed); the sample subset reproduces the same pipeline on less data.
 ├── data/
 │   ├── sample_snapshots/           # committed 1-day subset (reproducible backtest)
 │   └── reports/                    # committed canonical run output + findings.png
-├── docs/JOURNEY.md                 # the eleven design problems and how each was solved
+├── docs/JOURNEY.md                 # the twelve design problems and how each was solved
 ├── notebooks/01_project_guide.ipynb # reader-facing guide to the project
 ├── tests/                          # lightweight model sanity tests
 ├── CHECKPOINT.md                   # plain-language project explanation
@@ -285,7 +325,10 @@ gaps before any live use:
   error are not simulated in the taker backtest.
 - The SVI fit has no butterfly or calendar no-arbitrage constraints, and the
   digital price uses `N(d2)` with the strike's implied vol, without the
-  smile-skew correction.
+  smile-skew correction. Finding 1b suggests this does not matter in this
+  sample, since a flat-vol lognormal scores the same.
+- The realised-vol baselines are weak: the collector has gaps, so short windows
+  rest on 20-27 events. No basis (BRTI vs Deribit index) model has been tested yet.
 
 **Microstructure (the real issue)**
 - 60s REST snapshots are too slow for live execution. WebSocket order book

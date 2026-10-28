@@ -22,6 +22,7 @@ data/reports/*.txt
 !data/reports/backtest_canonical.txt
 !data/reports/backtest_sample.txt
 !data/reports/score_ci.txt
+!data/reports/vol_ablation.txt
 
 # Logs
 *.log
